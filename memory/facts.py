@@ -13,6 +13,7 @@ import json
 import os
 import re
 import asyncio
+import threading
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -69,6 +70,16 @@ class FactStore:
         self._config_manager = get_config_manager()
         self._time_indexed = time_indexed_memory
         self._facts: dict[str, list[dict]] = {}  # {lanlan_name: [fact, ...]}
+        self._locks: dict[str, threading.Lock] = {}  # per-character 文件锁
+        self._locks_guard = threading.Lock()  # 保护 _locks 字典本身
+
+    def _get_lock(self, name: str) -> threading.Lock:
+        """获取角色专属的文件锁（懒创建）"""
+        if name not in self._locks:
+            with self._locks_guard:
+                if name not in self._locks:  # double-check
+                    self._locks[name] = threading.Lock()
+        return self._locks[name]
 
     # ── persistence ──────────────────────────────────────────────────
 
@@ -83,20 +94,24 @@ class FactStore:
         path = self._facts_path(name)
         if name in self._facts:
             return self._facts[name]
-        if os.path.exists(path):
-            try:
-                with open(path, encoding='utf-8') as f:
-                    data = json.load(f)
-                if isinstance(data, list):
-                    if self._migrate_v1_entity_values(data):
-                        atomic_write_json(path, data, indent=2, ensure_ascii=False)
-                        logger.info(f"[FactStore] {name}: v1→v2 entity 值迁移完成")
-                    self._facts[name] = data
-                    return data
-            except (json.JSONDecodeError, OSError) as e:
-                logger.warning(f"[FactStore] 加载 facts 文件失败: {e}")
-        self._facts[name] = []
-        return self._facts[name]
+        with self._get_lock(name):
+            # double-check: 另一个线程可能在等锁期间已经加载了
+            if name in self._facts:
+                return self._facts[name]
+            if os.path.exists(path):
+                try:
+                    with open(path, encoding='utf-8') as f:
+                        data = json.load(f)
+                    if isinstance(data, list):
+                        if self._migrate_v1_entity_values(data):
+                            atomic_write_json(path, data, indent=2, ensure_ascii=False)
+                            logger.info(f"[FactStore] {name}: v1→v2 entity 值迁移完成")
+                        self._facts[name] = data
+                        return data
+                except (json.JSONDecodeError, OSError) as e:
+                    logger.warning(f"[FactStore] 加载 facts 文件失败: {e}")
+            self._facts[name] = []
+            return self._facts[name]
 
     @classmethod
     def _migrate_v1_entity_values(cls, facts: list[dict]) -> bool:
@@ -113,23 +128,24 @@ class FactStore:
     def save_facts(self, name: str) -> None:
         facts = self._facts.get(name, [])
         path = self._facts_path(name)
-        # Read-merge-write: 保护其他进程写入的 absorbed 标记
-        if os.path.exists(path):
-            try:
-                with open(path, encoding='utf-8') as f:
-                    disk_facts = json.load(f)
-                if isinstance(disk_facts, list):
-                    absorbed_ids = {
-                        f['id'] for f in disk_facts
-                        if isinstance(f, dict) and f.get('absorbed')
-                    }
-                    if absorbed_ids:
-                        for f in facts:
-                            if f.get('id') in absorbed_ids:
-                                f['absorbed'] = True
-            except (json.JSONDecodeError, OSError):
-                pass
-        atomic_write_json(path, facts, indent=2, ensure_ascii=False)
+        with self._get_lock(name):
+            # Read-merge-write: 保护其他进程写入的 absorbed 标记
+            if os.path.exists(path):
+                try:
+                    with open(path, encoding='utf-8') as f:
+                        disk_facts = json.load(f)
+                    if isinstance(disk_facts, list):
+                        absorbed_ids = {
+                            f['id'] for f in disk_facts
+                            if isinstance(f, dict) and f.get('absorbed')
+                        }
+                        if absorbed_ids:
+                            for f in facts:
+                                if f.get('id') in absorbed_ids:
+                                    f['absorbed'] = True
+                except (json.JSONDecodeError, OSError):
+                    pass
+            atomic_write_json(path, facts, indent=2, ensure_ascii=False)
         # 基于文件修改时间节流归档：距上次归档超过 _ARCHIVE_COOLDOWN_HOURS 才尝试
         try:
             archive_path = self._facts_archive_path(name)
