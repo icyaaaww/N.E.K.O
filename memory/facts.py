@@ -203,9 +203,10 @@ class FactStore:
                 return 0
         existing_archive.extend(to_archive)
         atomic_write_json(archive_path, existing_archive, indent=2, ensure_ascii=False)
-        # 更新活跃文件
-        self._facts[name] = active
-        atomic_write_json(self._facts_path(name), active, indent=2, ensure_ascii=False)
+        # 原地更新活跃列表（保持对象引用不变，避免外部持有旧引用导致修改丢失）
+        facts.clear()
+        facts.extend(active)
+        atomic_write_json(self._facts_path(name), facts, indent=2, ensure_ascii=False)
         logger.info(f"[FactStore] {name}: 归档 {len(to_archive)} 条已吸收的旧 facts，剩余 {len(active)} 条")
         return len(to_archive)
 
