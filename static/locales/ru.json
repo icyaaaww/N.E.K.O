@@ -28,7 +28,19 @@
         "fieldSeparator": ", ",
         "tryAgainLater": "Пожалуйста, попробуйте позже",
         "user": "Пользователь",
-        "project": "Проект"
+        "project": "Проект",
+        "collapse": "Свернуть",
+        "play": "Воспроизвести",
+        "pause": "Пауза",
+        "on": "ВКЛ",
+        "off": "ВЫКЛ",
+        "toneMappingNone": "Нет",
+        "toneMappingLinear": "Линейная",
+        "toneMappingReinhard": "Reinhard",
+        "toneMappingCineon": "Cineon",
+        "toneMappingACESFilmic": "ACES Filmic",
+        "toneMappingAgX": "AgX",
+        "toneMappingNeutral": "Нейтральная"
     },
     "characterProfile": {
         "gender": "Пол",
@@ -45,7 +57,14 @@
             "档案名": "Имя профиля",
             "性别": "Пол",
             "年龄": "Возраст",
-            "昵称": "Прозвище"
+            "昵称": "Прозвище",
+            "性格原型": "Архетип личности",
+            "种族": "Раса",
+            "自称": "Обращение к себе",
+            "核心特质": "Ключевые черты",
+            "行为特点": "Особенности поведения",
+            "厌恶": "Не переносит",
+            "一句话台词": "Коронная фраза"
         }
     },
     "steam": {
@@ -65,6 +84,10 @@
         "tagsPreview": "Теги",
         "notesPreview": "Заметки",
         "selectCharaToPreview": "Выберите персонажа для предпросмотра",
+        "coverBgBottom": "Нижний слой фона",
+        "characterCardCover": "Обложка карточки персонажа",
+        "coverBgTop": "Верхний слой фона",
+        "selectCharacterForCover": "Выберите персонажа, чтобы посмотреть обложку",
         "characterModelNotSet": "Модель персонажа не задана",
         "selectCharacterCard": "Выберите карточку персонажа",
         "characterCardNotFound": "Данные карточки персонажа не найдены",
@@ -93,6 +116,14 @@
         "live2dInitFailed": "Ошибка инициализации среды предпросмотра Live2D",
         "live2dPreviewLoaded": "Предпросмотр модели Live2D загружен успешно",
         "live2dPreviewLoadFailed": "Ошибка загрузки предпросмотра модели Live2D: {{error}}",
+        "searchAriaLabel": "Поиск по подпискам",
+        "sortAriaLabel": "Порядок сортировки",
+        "vrmModuleLoadFailed": "Не удалось загрузить модуль VRM",
+        "vrmPreviewLoaded": "Предпросмотр модели VRM загружен",
+        "vrmPreviewFailed": "Не удалось загрузить предпросмотр модели VRM",
+        "mmdModuleLoadFailed": "Не удалось загрузить модуль MMD",
+        "mmdPreviewLoaded": "Предпросмотр модели MMD загружен",
+        "mmdPreviewFailed": "Не удалось загрузить предпросмотр модели MMD",
         "placeholderCharacterName": "Введите имя персонажа",
         "placeholderDescription": "Введите описание",
         "placeholderCharacterSetting": "Введите настройки персонажа",
@@ -307,6 +338,7 @@
         "default": "По умолчанию",
         "noVoiceSelected": "Голос не выбран",
         "noDescription": "Нет описания",
+            "characterSettingsFile": "Файл настроек персонажа",
         "workshopAgreementText": "Нажимая «Загрузить», вы соглашаетесь с условиями использования Мастерской Steam, включая юридическое соглашение Мастерской:",
         "alreadyUploaded": "Загружено в Мастерскую",
         "uploadTime": "Время загрузки",
@@ -478,7 +510,7 @@
         "RESPONSE_INVALID": "Ответ AI не соответствует требованиям, вывод отброшен",
         "NO_USER_MESSAGE": "⚠️ В истории диалога нет сообщений пользователя, невозможно сгенерировать ответ",
         "LLM_RETRY": "⚠️ LLM {{error_type}}, повторная попытка ({{attempt}}/{{max_retries}})...",
-        "LLM_UPSTREAM_ERROR": "⚠️ Приносим извинения, внутренняя ошибка вышестоящего AI-провайдера. Автоматический повтор...",
+        "LLM_UPSTREAM_ERROR": "⚠️ Приносим извинения, мяу~, внутренняя ошибка вышестоящего AI-провайдера. Автоматический повтор...",
         "LLM_CONNECTION_EXHAUSTED": "💥 Ошибка подключения LLM ({{error_type}}), исчерпано {{max_retries}} попыток: {{error}}",
         "TEXT_GEN_ERROR": "💥 Ошибка генерации текста: {{error_type}}: {{error}}",
         "LLM_NO_RESPONSE": "💥 LLM не вернул ответ. Проверьте подключение к API и настройки.",
@@ -520,7 +552,7 @@
         "title": "Чат",
         "viewerTitle": "Чат (Режим просмотра)",
         "tooltip": "Область чата",
-        "textInputPlaceholder": "Режим текстового чата... Нажмите Enter для отправки, Shift+Enter для новой строки",
+        "textInputPlaceholder": "Нажмите Enter для отправки, Shift+Enter для новой строки",
         "send": "Отправить",
         "importImage": "Импортировать изображение",
         "importImageAriaLabel": "Импортировать изображение",
@@ -542,6 +574,15 @@
         "avatarPreviewPlaceholder": "AVATAR",
         "avatarPreviewCardNote": "Аватар будет создан на основе текущей отображаемой модели Live2D / VRM / MMD.",
         "avatarPreviewRefresh": "Обновить аватар",
+        "avatarPreviewReady": "Аватар обновлен",
+        "avatarPreviewReadyHint": "Это предпросмотр аватара, извлеченный в реальном времени из холста текущей модели.",
+        "avatarPreviewWaiting": "Ожидание создания кэша аватара для текущей модели",
+        "avatarPreviewUnavailable": "Функция предпросмотра аватара еще не готова.",
+        "avatarPreviewInputHidden": "Область ввода сейчас скрыта. Вернитесь в текстовый чат, чтобы посмотреть аватар.",
+        "avatarPreviewCachedHint": "Показан кэшированный аватар текущей модели. Нажмите кнопку обновления, чтобы создать его заново.",
+        "avatarPreviewRefreshing": "Обновление текущего аватара...",
+        "avatarPreviewGenerating": "Создание текущего аватара...",
+        "avatarPreviewFailed": "Не удалось создать аватар",
         "emptyState": "Сообщения появятся здесь после подключения чата.",
         "messageStreaming": "Генерация",
         "messageFailed": "Ошибка отправки",
@@ -564,7 +605,50 @@
         "emojiButtonAriaLabel": "Эмодзи",
         "attachmentButtonAriaLabel": "Вложение",
         "jukebox": "Музыкальный автомат",
-        "jukeboxLabel": "Музыкальный автомат"
+        "jukeboxLabel": "Музыкальный автомат",
+        "exportConversation": "Экспортировать диалог",
+        "exportSelected": "Экспортировать выбранное",
+        "exportPreviewTitle": "Предпросмотр экспорта",
+        "exportPreviewSummary": "Выбрано: {{count}}",
+        "exportPreviewEmpty": "Нет данных для предпросмотра.",
+        "exportFormatLabel": "Формат экспорта",
+        "exportFormatMarkdown": "Markdown",
+        "exportFormatImage": "Изображение",
+        "exportImageFormatPng": "PNG",
+        "exportImageFormatJpeg": "JPEG",
+        "exportImageFormatWebp": "WebP",
+        "exportImageStyleNeko": "N.E.K.O",
+        "exportImageStyleOriginal": "Оригинал",
+        "exportImageStylePoster": "Свежий",
+        "exportImageStyleLyrics": "Лирика",
+        "exportPosterTitle": "Избранное из диалога",
+        "exportPosterSubtitle": "Поделено из N.E.K.O",
+        "exportImageFormatUnsupported": "Экспорт в формате {{format}} не поддерживается в текущем окружении.",
+        "confirmExportAs": "Экспорт в {{format}}",
+        "exportMarkdownPreviewSubtitle": "Отрендеренный предпросмотр экспортируемого Markdown.",
+        "exportPreviewLoading": "Генерация предпросмотра…",
+        "exportPreviewFailed": "Не удалось сгенерировать предпросмотр.",
+        "previewOpenWindow": "Открыть в окне",
+        "previewClose": "Закрыть",
+        "previewOpenBlocked": "Не удалось открыть окно предпросмотра.",
+        "previewOpenFailed": "Не удалось открыть окно предпросмотра.",
+        "copyMarkdown": "Копировать Markdown",
+        "copyMarkdownSuccess": "Markdown скопирован в буфер обмена.",
+        "copyMarkdownFailed": "Не удалось скопировать Markdown.",
+        "exportEmpty": "Пока нет диалога для экспорта.",
+        "exportSelectionEmpty": "Выберите хотя бы одно сообщение для экспорта.",
+        "exportSuccess": "Диалог успешно экспортирован",
+        "exportFileTitle": "Экспорт диалога Project N.E.K.O",
+        "exportGeneratedAt": "Время экспорта",
+        "exportUser": "Пользователь",
+        "exportAssistant": "N.E.K.O.",
+        "exportImageLabel": "Изображение",
+        "exportAudioLabel": "Аудио",
+        "exportVideoLabel": "Видео",
+        "exportSelectAll": "Выбрать всё",
+        "exportSelectNone": "Снять",
+        "exportSelectInvert": "Инверсия",
+        "exportSelectionCount": "Выбрано {{selected}} из {{total}}"
     },
     "voiceControl": {
         "startVoice": "Начать голос",
@@ -733,6 +817,8 @@
         "keyAutoFilledFromKeyBook": "Ключ автозаполнен из книги API ключей. Настройте его там.",
         "goToKeyBook": "Перейти к книге ключей",
         "providerLabel": "Провайдер",
+        "providerSelectPlaceholder": "Выберите провайдера",
+        "noOptionsAvailable": "Нет доступных вариантов",
         "customModelProviderFollowCore": "Следовать за основным API",
         "customModelProviderFollowAssist": "Следовать за вспомогательным API",
         "customModelProviderCustom": "Пользовательский",
@@ -810,7 +896,7 @@
         "apiUrl": "URL API",
         "apiKey": "API Key",
         "modelId": "ID модели",
-        "agentApiConfigTitle": "Конфигурация API Агента",
+        "agentApiConfigTitle": "Конфигурация API Агента (нужна поддержка зрения)",
         "providerPlaceholder": "например, openai, azure, local",
         "apiUrlPlaceholder": "например, https://api.openai.com/v1",
         "modelIdPlaceholder": "например, gpt-5.1-chat-latest, qwen-flash",
@@ -912,6 +998,7 @@
             "hitAreaId": "Область касания",
             "close": "Закрыть",
             "configSaved": "Настройки касаний сохранены",
+            "saved": "Сохранено",
             "noHitAreas": "Модель не имеет областей касания",
             "modelNotFound": "Модель не загружена",
             "modelDataNotReady": "Внутренние данные модели не готовы",
@@ -1187,6 +1274,8 @@
         "prefixShouldBeEnglishLetterAndNumber": "Префикс должен состоять из английских букв и цифр",
         "invalidApiKeyProvided": "Указан неверный API-ключ",
         "requestError": "Ошибка запроса: {{error}}",
+        "serverNonJsonError": "Сервер вернул не-JSON ответ (HTTP {{status}}): {{snippet}}",
+        "serverRouteNotFound": "Маршрут API не найден (HTTP {{status}}). Убедитесь, что сервер развёрнут и перезапущен.",
         "voiceIdSaveFailed": "Не удалось автоматически сохранить voice_id: {{error}}",
         "voiceIdSaved": "voice_id автоматически сохранён для персонажа",
         "pageWillRefresh": "Текущая страница обновится для применения нового голоса",
@@ -1323,6 +1412,7 @@
         "profileNameContainsSlash": "Имя профиля не может содержать разделители пути (/ или \\)",
         "profileNameContainsDot": "Имя профиля не может содержать точки (.)",
         "profileNameInvalidChars": "Имя профиля может содержать только буквы, цифры, пробелы, подчёркивания, дефисы, скобки, средние точки (·/・) и апострофы",
+        "profileNameReservedRoute": "Это имя зарезервировано как системный маршрут и не может использоваться в качестве имени профиля",
         "newProfileNameRequired": "Новое имя профиля не может быть пустым",
         "newProfileNameTooLong": "Имя профиля слишком длинное",
         "required": "*",
@@ -1405,6 +1495,7 @@
         "saveMasterError": "Ошибка сохранения настроек хозяина",
         "autoSaved": "Настройки автосохранены",
         "autoSaveFailed": "Автосохранение не удалось, сохраните вручную перед закрытием",
+        "partialSaveVoiceFailed": "Персонаж сохранён, но не удалось обновить голос: {{error}}",
         "exportCard": "Экспорт карточки персонажа",
         "exportingCard": "Экспорт карточки персонажа...",
         "exportCardSuccess": "Карточка персонажа успешно экспортирована",
@@ -1467,6 +1558,7 @@
         "switchingCatgirl": "Переключение на {{name}}...",
         "switchedCatgirl": "Переключено на {{name}}",
         "switchCatgirlFailed": "Не удалось переключиться на {{name}}",
+        "switchCatgirlError": "Ошибка переключения: {{error}}",
         "started": "{{name}} запущена",
         "voiceUpdated": "Голос {{name}} обновлён",
         "audioWorkletFailed": "AudioWorklet не загрузился",
@@ -1489,6 +1581,7 @@
         "connectingToServer": "Подключение к серверу...",
         "readyToSpeak": "Готово к разговору!",
         "screenShareRequiresVoice": "Демонстрация экрана только для аудио/видео звонков",
+        "screenRecordingPermissionDenied": "⚠️ Разрешение на запись экрана не предоставлено. Разрешите запись экрана в системных настройках",
         "repetitionDetected": "Обнаружено повторение. Рекомендуем завершить разговор, чтобы {{name}} отдохнула.",
         "modelSwitched": "Модель переключена",
         "screenSource": {
@@ -1497,6 +1590,7 @@
             "noSources": "Нет доступных источников экрана",
             "loadFailed": "Не удалось загрузить источники экрана",
             "screens": "Экраны",
+            "screenLabel": "Экран {{index}}",
             "windows": "Окна",
             "selected": "Выбрано {{source}}",
             "sourceLost": "Не удалось найти ранее выбранное окно, переключено на полноэкранную демонстрацию"
@@ -1574,6 +1668,7 @@
             "browserUse": "Управление браузером",
             "focusMode": "Разрешить прерывание",
             "unavailable": "{{name}} Недоступен",
+            "toggleFailed": "Ошибка переключения {{name}}: {{error}}",
             "checking": "Проверка...",
             "serverOffline": "Сервер Лапки Неко оффлайн",
             "masterRequired": "Сначала включите главный переключатель Лапки Неко",
@@ -1584,6 +1679,7 @@
             "openfang": "Её рабочий стол",
             "userPluginAdapting": "Пользовательский плагин (В разработке)",
             "openclawConnect": "OpenClaw",
+            "openclawGuide": "Руководство по OpenClaw",
             "animationSettings": "Настройки анимации",
             "chatSettings": "Настройки чата",
             "frameRate": "Частота кадров",
@@ -1598,6 +1694,7 @@
             "mouseTracking": "Отслеживание мыши",
             "fullscreenTracking": "Полноэкранное отслеживание",
             "localTracking": "Локальное отслеживание",
+            "lockedHoverFade": "Затухание при наведении (заблокировано)",
             "textGuardMaxLength": "Ограничение длины ответа",
             "unlimited": "Без ограничений",
             "characters": " символов",
@@ -1606,9 +1703,20 @@
             "textGuardNote": "Применяется только к текстовым ответам; не влияет на голосовые сессии"
         }
     },
+    "openclawGuide": {
+        "windowTitle": "Руководство по OpenClaw - N.E.K.O.",
+        "pageTitle": "Руководство по OpenClaw",
+        "pageSubtitle": "Соединяет установку CoPaw, размещение канала, health-check и настройки N.E.K.O в один понятный путь.",
+        "sourceLabel": "Источник руководства",
+        "contentLanguageNotice": "Основной текст сейчас взят из китайского документа. Переключение языка влияет только на элементы управления страницы.",
+        "languageLabel": "Язык",
+        "guideUnavailable": "Содержимое руководства пусто."
+    },
     "subtitle": {
         "title": "Субтитры в реальном времени",
-        "enable": "Включить перевод"
+        "enable": "Перевод субтитров",
+        "enableAriaLabel": "Переключить перевод субтитров",
+        "markdownPlaceholder": "[форматированный контент]"
     },
     "viewer": {
         "title": "Просмотр — Project N.E.K.O."
@@ -1626,7 +1734,8 @@
             "freeModelWarning": "Из-за ограничений квоты использование бесплатной модели в режиме Лапки Неко может вызвать блокировку. Рекомендуется перейти на платную модель.\n\nЕсли вы уже настроили платный API, попробуйте перезапустить NEKO.",
             "freeModelWarningTitle": "Уведомление о бесплатной модели",
             "connectivityCheck": "Проверка подключения LLM Лапки Неко...",
-            "precheckFailed": "Предварительная проверка Лапки Неко не удалась: {{reason}}"
+            "precheckFailed": "Предварительная проверка Лапки Неко не удалась: {{reason}}",
+            "toggleFailed": "Ошибка переключения Agent: {{error}}"
         },
         "precheck": {
             "AGENT_PRECHECK_PENDING": "Проверка подключения...",
@@ -1761,7 +1870,10 @@
             "selectedCount": "Выбрано: {{count}}",
             "changed": "Анимация ожидания изменена",
             "changeFailed": "Не удалось изменить анимацию ожидания"
-        }
+        },
+        "managerInitFailed": "Не удалось инициализировать менеджер MMD",
+        "modelLoading": "Загрузка модели MMD...",
+        "modelLoaded": "Модель MMD успешно загружена"
     },
     "modelManager": {
         "vrmLoadingDependencies": "[VRM] Начало загрузки зависимых модулей",
@@ -1867,11 +1979,11 @@
         },
         "step1b": {
             "title": "🖱️ Перетаскивание и масштабирование",
-            "desc": "Вы можете перетаскивать Neko и масштабировать колёсиком мыши. Попробуйте~"
+            "desc": "Вы можете перетаскивать Neko и масштабировать <strong>колёсиком мыши</strong>. Попробуйте~"
         },
         "step1c": {
             "title": "🔒 Заблокировать Neko",
-            "desc": "Нажмите замок для фиксации позиции Neko. Нажмите снова для разблокировки~"
+            "desc": "Нажмите замок для фиксации позиции Neko. Плавающая панель вокруг неё также перестанет появляться. Нажмите снова для разблокировки~"
         },
         "step2": {
             "title": "💬 Область чата",
@@ -1895,15 +2007,15 @@
         },
         "step7": {
             "title": "🖥️ Демонстрация экрана",
-            "desc": "Покажите экран вашему Neko~"
+            "desc": "После включения экран будет непрерывно транслироваться вашему Neko. Доступно только во время голосового сеанса~"
         },
         "step8": {
             "title": "🔨 Лапка Неко",
-            "desc": "Откройте панель «Лапка Неко»: computer use, browser use, plugin и другие функции~"
+            "desc": "Откройте панель «Лапка Неко»: Управление клавиатурой/мышью, Управление браузером, пользовательский плагин и другие функции. Neko сможет пользоваться вашим компьютером, помогать в работе и играть вместе с вами~"
         },
         "step9": {
             "title": "💤 Попросить уйти",
-            "desc": "Пусть Neko уйдёт на время. Нажмите «Вернуться» для возврата~"
+            "desc": "Пусть Neko уйдёт на время. Нажмите «Вернуться» для возврата~ <strong>Если у Neko возникли проблемы, дайте ей отдохнуть — часто это помогает их решить.</strong>"
         },
         "step10": {
             "title": "⚙️ Настройки",
@@ -1915,7 +2027,7 @@
         },
         "step14": {
             "title": "👀 Проактивное зрение",
-            "desc": "Neko активно читает информацию с экрана~"
+            "desc": "В отличие от Демонстрации экрана, которая непрерывно транслирует во время голосового сеанса, Проактивное зрение позволяет Neko время от времени самостоятельно поглядывать на ваш экран. Настройте интервал здесь~"
         },
         "step15": {
             "title": "👤 Менеджер персонажей",
@@ -1942,10 +2054,10 @@
             },
             "menu": {
                 "title": "📋 Меню трея",
-                "desc": "Правый клик на иконке N.E.K.O. в трее для меню. Две основные функции:"
+                "desc": "Кликните правой кнопкой по иконке N.E.K.O в системном трее (см. предыдущую подсказку). Основные функции:"
             },
             "reset": {
-                "title": "🔄 Сбросить позицию модели",
+                "title": "🔄 Сбросить позицию аватара",
                 "desc": "Если Neko ушёл за экран, нажмите для возврата в позицию по умолчанию~"
             },
             "switchMode": "Переключить Десктоп/Мобильный режим",
@@ -1961,11 +2073,15 @@
                 "title": "🎉 Обучение завершено!",
                 "desc": "Поздравляем! Вы знаете основные функции N.E.K.O. Для повтора нажмите «Сбросить руководство» в настройках~"
             },
-            "resetPosition": "Сбросить позицию модели",
+            "resetPosition": "Сбросить позицию аватара",
+            "resetPositionDesc": "Вернёт Neko в позицию по умолчанию~",
+            "openChat": "Открыть чат",
+            "openChatDesc": "Откроет отдельное окно для текстового чата~",
+            "important": "ВАЖНО:",
             "compatibility": "Режим совместимости",
-            "hotkeyDesc": "Настройте глобальные горячие клавиши~",
+            "hotkeyDesc": "Настройте горячие клавиши для управления N.E.K.O~",
             "uploadLogs": "Загрузить логи",
-            "exitDesc": "Нажмите Выход для закрытия N.E.K.O.~"
+            "exitDesc": "Закрыть N.E.K.O. Меню трея — основной способ выхода~"
         },
         "completed": "✨ Обучение завершено! Наслаждайтесь~",
         "resetHint": {
@@ -2045,6 +2161,24 @@
                 "step9": {
                     "title": "🎞️ Tone Mapping",
                     "desc": "Select different tone mapping algorithms to control highlight and shadow rendering."
+                }
+            },
+            "mmd": {
+                "step1": {
+                    "title": "🎭 Выбор модели MMD",
+                    "desc": "В режиме Live3D (MMD) выберите модель здесь. MMD и VRM используют один и тот же список моделей."
+                },
+                "step2": {
+                    "title": "💃 VMD анимация",
+                    "desc": "Выберите VMD движение для вашей MMD модели. Используйте «Импорт VMD», чтобы добавить пользовательские файлы движений."
+                },
+                "step3": {
+                    "title": "🌟 Освещение MMD",
+                    "desc": "В «Настройках MMD модели» настройте окружающий и основной свет, экспозицию и тональную компрессию для 3D-сцены."
+                },
+                "step4": {
+                    "title": "😄 Настройка эмоций",
+                    "desc": "После выбора модели откройте настройки эмоций здесь. В Live3D MMD и VRM используют эту кнопку совместно (не кнопку Live2D)."
                 }
             }
         },
@@ -2478,6 +2612,7 @@
         "weibo": "🌏 Weibo",
         "twitter": "🐦 Twitter/X",
         "reddit": "👽 Reddit",
+        "netease": "🎶 NetEase Cloud Music",
         "saveConfig": "Сохранить конфигурацию",
         "encryptStorage": "Безопасное шифрование и сохранение в локальный файл",
         "localMonitoring": "Мониторинг локального статуса",
@@ -2503,7 +2638,8 @@
             "kuaishou": "📌 <b>Цель:</b> Перейдите на <b>kuaishou.com</b>, чтобы получить эти файлы cookie.",
             "weibo": "📌 <b>Цель:</b> Перейдите на <b>weibo.com</b>, чтобы получить эти файлы cookie.",
             "twitter": "📌 <b>Цель:</b> Перейдите на <b>x.com</b>, чтобы получить эти файлы cookie.",
-            "reddit": "📌 <b>Цель:</b> Перейдите на <b>reddit.com</b>, чтобы получить эти файлы cookie."
+            "reddit": "📌 <b>Цель:</b> Перейдите на <b>reddit.com</b>, чтобы получить эти файлы cookie.",
+            "netease": "📌 <b>Цель:</b> Перейдите на <b>music.163.com</b>, чтобы получить эти файлы cookie."
         },
         "guide": {
             "title": "Универсальное руководство для новичков",
@@ -2585,6 +2721,14 @@
             "csrftoken": {
                 "label": "csrftoken",
                 "desc": "CSRF-токен"
+            },
+            "MUSIC_U": {
+                "label": "MUSIC_U",
+                "desc": "Основные учётные данные (Обязательно)"
+            },
+            "NMTID": {
+                "label": "NMTID",
+                "desc": "Идентификатор устройства (Необязательно)"
             }
         },
         "status": {
@@ -2596,6 +2740,7 @@
             "openQR": "📱 Открыть QR-вход",
             "loading": "Получение QR-кода...",
             "scanTitle": "📱 Вход по QR {{platform}}",
+            "qrCodeAlt": "QR-код для входа",
             "waiting": "Ожидание сканирования...",
             "validFor": "QR-код действителен: {{seconds}}сек",
             "refreshQR": "Обновить QR-код",
@@ -2608,7 +2753,14 @@
                 "scanned": "📱 {{message}}",
                 "waiting": "{{message}}..."
             },
-            "successAlert": "QR-вход успешен! Cookies автоматически заполнены, нажмите Сохранить конфигурацию"
+            "statusMessage": {
+                "success": "Вход выполнен",
+                "expired": "Срок действия QR-кода истек",
+                "scanned": "Код отсканирован, подтвердите вход на телефоне",
+                "waiting": "Ожидание сканирования"
+            },
+            "successAlert": "QR-вход успешен! Cookies автоматически заполнены, нажмите Сохранить конфигурацию",
+            "extractFailed": "⚠️ QR-вход выполнен, но не удалось автоматически извлечь поля. Проверьте вручную."
         }
     },
     "music": {
@@ -2627,7 +2779,10 @@
         "playError": "Не удалось загрузить воспроизведение музыки",
         "loadError": "Не удалось загрузить музыкальный плеер",
         "autoplayBlocked": "Браузер заблокировал автовоспроизведение, пожалуйста, нажмите кнопку воспроизведения",
-        "ended": "Завершено"
+        "ended": "Завершено",
+        "unknownState": "Неизвестное состояние",
+        "volume": "Громкость: ",
+        "unsafeSource": "Небезопасный источник аудио заблокирован: {{domain}}"
     },
     "Jukebox": {
         "title": "Музыкальный автомат",
@@ -2638,6 +2793,10 @@
         "playing": "Играет: {{name}} - {{artist}}",
         "error": "Ошибка: {{message}}",
         "volume": "Громкость",
+        "mute": "Без звука",
+        "noSongPlaying": "Сейчас ничего не воспроизводится",
+        "noActionBound": "Для текущей песни не привязана анимация",
+        "adjustOffsetFailed": "Не удалось изменить смещение",
         "stop": "Остановить",
         "sequence": "№",
         "song": "Песня",
@@ -2681,8 +2840,91 @@
         "idleRestoreFailed": "Не удалось восстановить анимацию ожидания",
         "btnNotFoundGiveUp": "Кнопка джукбокса не найдена после повторных попыток",
         "minimizeBtnNotFoundGiveUp": "Кнопка сворачивания не найдена после повторных попыток",
-        "noticeDance": "💃 Танцевальное сопровождение доступно только при загрузке MMD-аватара",
-        "noticeMusic": "⚠️ Текущие треки предназначены только для тестирования — в будущих версиях защищённые авторским правом песни будут удалены, импортируйте свои"
+        "noticeDance": "💃 Танцевальное сопровождение в настоящее время доступно только при загрузке 3D-модели (MMD / VRM). В будущем будет добавлено больше взаимодействий",
+        "noticeMusic": "⚠️ Текущие треки предназначены только для тестирования — в будущих версиях защищённые авторским правом песни будут удалены, импортируйте свои",
+        "manager": "Менеджер",
+        "managerTitle": "Менеджер",
+        "songs": "Песни",
+        "actions": "Действия",
+        "bindings": "Привязки",
+        "import": "Импорт",
+        "export": "Экспорт",
+        "exportAll": "Экспортировать всё",
+        "exportAllIgnoreHidden": "Экспортировать всё (кроме скрытых)",
+        "exportAllIncludeHidden": "Экспортировать всё (включая скрытые)",
+        "exportSelected": "Экспортировать выбранное",
+        "dragZipHint": "Перетащите ZIP-файлы или папки сюда для импорта",
+        "unifiedDropHint": "Перетащите песни, анимации или пакет импорта сюда",
+        "clickToAdd": "Нажмите, чтобы добавить",
+        "dragMp3Hint": "Перетащите MP3-файлы сюда для добавления песен",
+        "dragVmdHint": "Перетащите VMD-файлы сюда для добавления анимаций",
+        "showHiddenSongs": "Показать скрытые песни",
+        "selectAll": "Выбрать всё",
+        "noActions": "Нет анимаций",
+        "show": "Показать",
+        "hide": "Скрыть",
+        "delete": "Удалить",
+        "unknown": "Неизвестно",
+        "defaultAction": "Анимация по умолчанию",
+        "clickSetDefault": "Нажмите, чтобы установить по умолчанию",
+        "format": "Формат",
+        "addSong": "Добавить песню",
+        "addAction": "Добавить анимацию",
+        "songList": "Список песен (перетащите вправо)",
+        "actionList": "Список анимаций (перетащите влево)",
+        "unbind": "Отвязать",
+        "addBinding": "Добавить привязку вручную",
+        "addSongBinding": "Добавить привязку песни вручную",
+        "addActionBinding": "Добавить привязку анимации вручную",
+        "cancel": "Отмена",
+        "confirm": "Подтвердить",
+        "confirmDeleteSong": "Вы уверены, что хотите удалить песню \"{{name}}\"?\nЭто действие нельзя отменить!",
+        "confirmDeleteAction": "Вы уверены, что хотите удалить анимацию \"{{name}}\"?\nЭто действие нельзя отменить!",
+        "deleteFailed": "Не удалось удалить",
+        "setDefaultFailed": "Не удалось установить по умолчанию",
+        "exportFailed": "Не удалось экспортировать",
+        "selectExportFirst": "Сначала выберите песни или анимации для экспорта",
+        "notExist": "{{type}} не существует",
+        "songNotExist": "Песня не существует",
+        "actionNotExist": "Анимация не существует",
+        "inputIndexOrName": "Введите номер или название",
+        "frame": "кадр",
+        "offset": "Смещение",
+        "selectedSongs": "Выбрано {{count}} песен",
+        "selectedActions": "Выбрано {{count}} анимаций",
+        "selectedSeparator": ", ",
+        "selectedInfo": "Выбрано {{songCount}} песен, {{actionCount}} анимаций",
+        "missing": "Отсутствует",
+        "unknownError": "Неизвестная ошибка",
+        "calibration": "Калибровка анимации",
+        "calibrationTitle": "Калибровка анимации",
+        "fps": "FPS",
+        "currentFrame": "Текущий кадр",
+        "reset": "Сброс",
+        "calibrationHint": "Используйте кнопки для точной настройки или перетащите ползунок для калибровки",
+        "calibrateAnimation": "Калибровка анимации",
+        "animationCalibration": "Калибровка анимации",
+        "closeCalibration": "Закрыть панель калибровки",
+        "advance1s": "Анимация на 1 секунду вперёд",
+        "advance10f": "Анимация на 10 кадров вперёд",
+        "advance1f": "Анимация на 1 кадр вперёд",
+        "delay1f": "Анимация на 1 кадр назад",
+        "delay10f": "Анимация на 10 кадров назад",
+        "delay1s": "Анимация на 1 секунду назад",
+        "frames": "кадров",
+        "operationFailed": "Операция не удалась",
+        "saveFailed": "Не удалось сохранить",
+        "importSuccess": "Импорт успешен!",
+        "importFailed": "Импорт не удался",
+        "importSongsAdded": "Добавлено {{count}} песен",
+        "importSongsMerged": "Объединено {{count}} песен",
+        "importActionsAdded": "Добавлено {{count}} анимаций",
+        "importActionsMerged": "Объединено {{count}} анимаций",
+        "importBindingsAdded": "Добавлено {{count}} привязок",
+        "noChanges": "Нет изменений",
+        "noImportFilesFound": "Не найдено файлов для импорта",
+        "missingConfigJson": "В папке отсутствует файл config.json",
+        "folderImportFailed": "Не удалось импортировать папку"
     },
     "notice": {
         "voiceMigration": {
@@ -2698,5 +2940,8 @@
             "title": "Мем",
             "loadError": "Не удалось загрузить мем"
         }
+    },
+    "achievement": {
+        "unlocked": "🏆 Достижение разблокировано: {{description}}"
     }
 }
