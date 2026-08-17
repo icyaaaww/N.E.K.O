@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import ClassVar
 
 import pytest
+import plugin as plugin_root
 import plugin.sdk.plugin as plugin_api
 
 from plugin.sdk.plugin import runtime
@@ -74,7 +75,7 @@ class _Ctx:
 
     def push_message(self, **kwargs: object) -> dict[str, object]:
         self.pushed_messages.append(dict(kwargs))
-        return {"ok": True}
+        return {"submitted": True}
 
 
 @dataclass(slots=True)
@@ -151,6 +152,9 @@ def test_plugin_meta_fields_shape() -> None:
         "version",
         "sdk_version",
         "description",
+        "short_description",
+        "keywords",
+        "passive",
         "sdk_recommended",
         "sdk_supported",
         "sdk_untested",
@@ -172,6 +176,98 @@ def test_neko_plugin_base_init_wires_ctx_config_plugins() -> None:
     assert isinstance(base._routers, list)
     assert base.config is not None
     assert base.plugins is not None
+
+
+def test_neko_plugin_base_refreshes_store_enabled_after_effective_config_arrives() -> None:
+    ctx = _Ctx()
+    ctx._effective_config = {}
+    base = _DemoPlugin(ctx=ctx)
+
+    assert base.store.enabled is False
+
+    ctx._effective_config = {
+        "plugin": {
+            "store": {"enabled": True},
+            "database": {"enabled": True, "name": "runtime.db"},
+        },
+        "plugin_state": {"backend": "file"},
+    }
+    base.refresh_runtime_config()
+
+    assert base.store.enabled is True
+    assert base.db.enabled is True
+    assert base.db.db_name == "runtime.db"
+    assert base.state.backend == "file"
+
+
+def test_neko_plugin_base_refresh_validates_database_name_before_enabling() -> None:
+    ctx = _Ctx()
+    ctx._effective_config = {}
+    base = _DemoPlugin(ctx=ctx)
+
+    assert base.store.enabled is False
+    assert base.db.enabled is False
+    assert base.db.db_name == "plugin.db"
+
+    ctx._effective_config = {
+        "plugin": {
+            "store": {"enabled": True},
+            "database": {"enabled": True, "name": "nested/bad.db"},
+        },
+        "plugin_state": {"backend": "file"},
+    }
+
+    with pytest.raises(ValueError, match="plain filename"):
+        base.refresh_runtime_config()
+
+    assert base.store.enabled is False
+    assert base.db.enabled is False
+    assert base.db.db_name == "plugin.db"
+    assert base.state.backend == "off"
+
+
+def test_neko_plugin_base_refresh_normalizes_state_backend() -> None:
+    ctx = _Ctx()
+    base = _DemoPlugin(ctx=ctx)
+
+    base.refresh_runtime_config(
+        {
+            "plugin": {"store": {"enabled": True}, "database": {"enabled": True, "name": "runtime.db"}},
+            "plugin_state": {"backend": "Memory"},
+        }
+    )
+    assert base.state.backend == "memory"
+
+    base.refresh_runtime_config(
+        {
+            "plugin": {"store": {"enabled": True}, "database": {"enabled": True, "name": "runtime.db"}},
+            "plugin_state": {"backend": "OFF"},
+        }
+    )
+    assert base.state.backend == "off"
+
+
+def test_neko_plugin_base_i18n_uses_plugin_toml_config(tmp_path: Path) -> None:
+    plugin_dir = tmp_path / "demo"
+    locale_dir = plugin_dir / "locales"
+    locale_dir.mkdir(parents=True)
+    (locale_dir / "ja.json").write_text('{"hello": "こんにちは"}', encoding="utf-8")
+    config_path = plugin_dir / "plugin.toml"
+    config_path.write_text(
+        "\n".join([
+            "[plugin]",
+            'id = "demo"',
+            "[plugin.i18n]",
+            'default_locale = "ja"',
+            'locales_dir = "locales"',
+        ]),
+        encoding="utf-8",
+    )
+
+    base = _DemoPlugin(ctx=_Ctx(config_path=config_path))
+
+    assert base.i18n.default_locale == "ja"
+    assert base.i18n.t("hello", locale="en", default="Hello") == "こんにちは"
 
 
 def test_get_input_schema_returns_dict_or_empty() -> None:
@@ -258,30 +354,34 @@ def test_enable_file_logging_keeps_default_logger_synced() -> None:
     assert logger is base.sdk_logger
 
 
-def test_plugin_base_convenience_accessors(tmp_path) -> None:
+def test_plugin_base_convenience_accessors(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "demo" / "plugin.toml"
     config_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_root = tmp_path / "runtime"
+    monkeypatch.setenv("NEKO_STORAGE_SELECTED_ROOT", str(runtime_root))
     base = _DemoPlugin(ctx=_Ctx(config_path=config_path))
+    storage_dir = runtime_root / "plugins" / "demo"
     assert base.plugin_id == "demo"
     assert base.metadata == {"role": "demo"}
     assert base.bus is not None
     assert base.bus.messages.get().count() == 0
     assert base.config_dir == tmp_path / "demo"
-    assert base.data_path() == tmp_path / "demo" / "data"
-    assert base.data_path("cache", "x.json") == tmp_path / "demo" / "data" / "cache" / "x.json"
+    assert base.plugin_dir == tmp_path / "demo"
+    assert base.storage_dir == storage_dir
+    assert base.runtime_config_path == storage_dir / "config" / "plugin.toml"
+    assert base.data_path() == storage_dir / "data"
+    assert base.data_path("records", "x.json") == storage_dir / "data" / "records" / "x.json"
+    assert base.cache_path() == storage_dir / "cache"
+    assert base.cache_path("preview", "x.png") == storage_dir / "cache" / "preview" / "x.png"
 
 
-def test_plugin_base_runtime_facades_are_lazy_and_cached() -> None:
+def test_plugin_base_system_info_facade_is_lazy_and_cached() -> None:
     base = _DemoPlugin(ctx=_Ctx())
 
-    memory_1 = base.memory
-    memory_2 = base.memory
     system_info_1 = base.system_info
     system_info_2 = base.system_info
 
-    assert memory_1 is memory_2
     assert system_info_1 is system_info_2
-    assert isinstance(memory_1, runtime.MemoryClient)
     assert isinstance(system_info_1, runtime.SystemInfo)
 
 
@@ -352,7 +452,7 @@ async def test_plugin_base_runtime_shortcuts_delegate_to_ctx() -> None:
     assert export_result == {"ok": True}
     assert ctx.exports[0]["export_type"] == "text"
     assert ctx.exports[0]["text"] == "hello"
-    assert push_result == {"ok": True}
+    assert push_result == {"submitted": True}
     assert ctx.pushed_messages[0]["source"] == "demo"
     assert finish_result["success"] is True
     assert finish_result["message"] == "done"
@@ -484,10 +584,13 @@ def test_plugin_init_all_contains_expected_symbols(plugin_api_module) -> None:
         "neko_plugin",
         "plugin_entry",
         "plugin",
+        "OsActivitySnapshot",
+        "get_os_activity_snapshot",
         "PluginConfig",
         "Plugins",
         "PluginRouter",
         "Result",
+        "PushMessageResult",
         "Ok",
         "Err",
     }
@@ -500,3 +603,17 @@ def test_plugin_init_all_contains_expected_symbols(plugin_api_module) -> None:
     assert "CallChain" not in mod.__all__
     assert "HookExecutorMixin" not in mod.__all__
     assert "EXTENDED_TYPES" not in mod.__all__
+
+
+def test_high_level_memory_client_surface_is_removed() -> None:
+    base = NekoPluginBase(ctx=_Ctx())
+
+    assert not hasattr(base, "memory")
+    assert not hasattr(plugin_root, "MemoryClient")
+    assert not hasattr(plugin_api, "MemoryClient")
+    assert not hasattr(runtime, "MemoryClient")
+
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("plugin.sdk.shared.runtime.memory")
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("plugin.core.bus.memory_client")

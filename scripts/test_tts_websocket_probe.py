@@ -1,8 +1,22 @@
 #!/usr/bin/env python3
+# Copyright 2025-2026 Project N.E.K.O. Team
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """
 Probe lanlan.app free TTS WebSocket and log raw handshake failures.
 
-Default URL is hardcoded to wss://lanlan.app/tts (no GeoIP / lanlan.tech switching).
+Default URL is hardcoded to wss://www.lanlan.app/tts (no GeoIP / www.lanlan.tech switching).
 
 Use when debugging HTTP 503 (or other non-101) during the WebSocket upgrade: the
 ``websockets`` library raises InvalidStatus with the full HTTP response attached.
@@ -10,7 +24,7 @@ Use when debugging HTTP 503 (or other non-101) during the WebSocket upgrade: the
 Examples:
   python scripts/test_tts_websocket_probe.py --token free-access --no-proxy
   python scripts/test_tts_websocket_probe.py --from-config --no-proxy
-  python scripts/test_tts_websocket_probe.py --from-config --no-proxy --protocol-roundtrip --text "测试"
+  python scripts/test_tts_websocket_probe.py --from-config --no-proxy --protocol-roundtrip --text "测试"  # noqa: DOCSTRING_CJK
 
 Env (optional): TTS_PROBE_TOKEN, AUDIO_API_KEY. Override URL only with --url if you must.
 """
@@ -19,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64 as _b64
 import json
 import logging
 import os
@@ -35,7 +50,12 @@ from websockets.exceptions import InvalidStatus
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Fixed probe target (do not route via ConfigManager GeoIP).
-DEFAULT_TTS_WSS_URL = "wss://lanlan.app/tts"
+#
+# The `www.` is required: the bare apex does not serve these endpoints, so a
+# probe pointed at it reports a handshake failure caused by its own URL rather
+# than by the service — which is the one thing a script whose whole purpose is
+# "log raw handshake failures" must not do.
+DEFAULT_TTS_WSS_URL = "wss://www.lanlan.app/tts"
 
 
 def _setup_logging(log_path: Path | None) -> logging.Logger:
@@ -218,7 +238,19 @@ async def run_probe(args: argparse.Namespace, log: logging.Logger) -> int:
                     "response_format": "wav",
                     "sample_rate": 24000,
                 }
-            out = json.dumps({"type": "tts.create", "data": create_data})
+            if args.voice_label_language:
+                # Test field placement for lanlan.tech voice_label.language.
+                # Position controlled by --voice-label-position: "data" (nested under data)
+                # vs "event" (sibling of data at top level).
+                vl = {"language": args.voice_label_language}
+                if args.voice_label_position == "event":
+                    payload = {"type": "tts.create", "data": create_data, "voice_label": vl}
+                else:
+                    create_data["voice_label"] = vl
+                    payload = {"type": "tts.create", "data": create_data}
+            else:
+                payload = {"type": "tts.create", "data": create_data}
+            out = json.dumps(payload)
             log.info("send tts.create")
             log.debug("send payload=%s", out)
             await ws.send(out)
@@ -243,12 +275,66 @@ async def run_probe(args: argparse.Namespace, log: logging.Logger) -> int:
                 await ws.send(te)
                 done = json.dumps({"type": "tts.text.done", "data": {"session_id": session_id}})
                 await ws.send(done)
-                for _ in range(50):
+                audio_chunks: list[bytes] = []
+                final_audio: bytes | None = None
+                audio_done = False
+                for _ in range(200):
                     try:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                        raw = await asyncio.wait_for(ws.recv(), timeout=3.0)
                     except TimeoutError:
                         break
-                    log.info("post-text recv: %s", raw if len(raw) < 2000 else raw[:2000] + "...")
+                    try:
+                        evt = json.loads(raw)
+                    except json.JSONDecodeError:
+                        log.info("post-text recv (non-JSON): %s", raw[:500])
+                        continue
+                    et = evt.get("type")
+                    if et == "tts.response.audio.delta":
+                        b64 = (evt.get("data") or {}).get("audio", "")
+                        if b64:
+                            try:
+                                audio_chunks.append(_b64.b64decode(b64))
+                            except Exception as e:
+                                log.warning("audio b64 decode failed: %s", e)
+                        log.info("post-text recv audio delta (%d bytes b64)", len(b64))
+                    elif et == "tts.response.audio.done":
+                        b64 = (evt.get("data") or {}).get("audio", "")
+                        if b64:
+                            try:
+                                final_audio = _b64.b64decode(b64)
+                            except Exception as e:
+                                log.warning("final audio b64 decode failed: %s", e)
+                        log.info("post-text recv audio.done (final audio %d bytes b64)", len(b64))
+                        audio_done = True
+                        break
+                    elif et == "tts.response.done":
+                        log.info("post-text recv response.done")
+                        audio_done = True
+                        break
+                    elif et == "tts.response.error":
+                        log.error("post-text server error: %s", raw)
+                        break
+                    else:
+                        log.info("post-text recv: %s", raw if len(raw) < 2000 else raw[:2000] + "...")
+                log.info("audio chunks=%d, final=%s, done=%s", len(audio_chunks), bool(final_audio), audio_done)
+                if args.save_audio:
+                    out_path = Path(args.save_audio)
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    # Prefer the assembled WAV from tts.response.audio.done;
+                    # fall back to first delta chunk.
+                    if final_audio:
+                        out_path.write_bytes(final_audio)
+                        log.info("saved final audio (%d bytes) to %s", len(final_audio), out_path.resolve())
+                    elif audio_chunks:
+                        merged = b"".join(audio_chunks)
+                        out_path.write_bytes(merged)
+                        log.info(
+                            "saved concatenated delta chunks (%d chunks, %d bytes) to %s "
+                            "(note: each chunk is a standalone WAV, file contains multiple headers)",
+                            len(audio_chunks),
+                            len(merged),
+                            out_path.resolve(),
+                        )
 
     finally:
         await ws.close()
@@ -276,9 +362,21 @@ def main() -> None:
     p.add_argument("--wait-connection", type=float, default=8.0, help="Wait for tts.connection.done")
     p.add_argument("--wait-session", type=float, default=5.0, help="Wait for tts.response.created")
     p.add_argument("--protocol-roundtrip", action="store_true", help="After handshake, send tts.create (+ optional text)")
-    p.add_argument("--voice-id", default="qingchunshaonv", help="voice_id only if --url is not lanlan.app")
+    p.add_argument("--voice-id", default="linjiameimei", help="voice_id only if --url is not lanlan.app")
     p.add_argument("--language-code", default="cmn-CN", help="language_code for lanlan.app (matches app default map)")
     p.add_argument("--text", default="", help="If set with --protocol-roundtrip, send this as tts.text.delta")
+    p.add_argument(
+        "--voice-label-language",
+        default="",
+        help="If set, include voice_label.language in tts.create (e.g. '日语', '粤语', '四川话'). For lanlan.tech.",
+    )
+    p.add_argument(
+        "--voice-label-position",
+        default="data",
+        choices=["data", "event"],
+        help="Where to place voice_label: nested under 'data' (default) or sibling at event level",
+    )
+    p.add_argument("--save-audio", default="", help="If set, write concatenated audio to this path (raw concatenated wav chunks)")
     p.add_argument(
         "--log-file",
         default="",

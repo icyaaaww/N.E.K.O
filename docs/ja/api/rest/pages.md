@@ -11,11 +11,10 @@ Web UI の HTML ページを提供します。すべてのページは Jinja2 �
 | `/live2d_parameter_editor` | `live2d_parameter_editor.html` | Live2D パラメータの微調整 |
 | `/live2d_emotion_manager` | `live2d_emotion_manager.html` | Live2D 感情-アニメーションマッピング |
 | `/vrm_emotion_manager` | `vrm_emotion_manager.html` | VRM 感情-アニメーションマッピング |
-| `/chara_manager` | `chara_manager.html` | キャラクター設定エディタ |
+| `/character_card_manager` | `character_card_manager.html` | キャラクター設定エディタ |
 | `/voice_clone` | `voice_clone.html` | 音声クローニングインターフェース |
 | `/api_key` | `api_key_settings.html` | API キー設定 |
-| `/steam_workshop_manager` | `steam_workshop_manager.html` | Steam Workshop 管理 |
-| `/memory_browser` | `memory_browser.html` | メモリの閲覧と編集 |
+| `/memory_browser` | `memory_browser.html` | 直近会話メモリのレビュー/編集とメモリ処理の設定 |
 | `/{lanlan_name}` | `index.html` | キャラクター固有のチャット（キャッチオール） |
 
 ::: info

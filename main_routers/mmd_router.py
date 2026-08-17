@@ -1,4 +1,18 @@
 # -*- coding: utf-8 -*-
+# Copyright 2025-2026 Project N.E.K.O. Team
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """
 MMD Router
 
@@ -7,8 +21,14 @@ Handles MMD model-related endpoints including:
 - MMD model upload
 - VMD animation listing and upload
 - MMD emotion mapping configuration
+
+URL convention: routes declared WITHOUT trailing slash (no ``@router.get('/')``).
+See ``main_routers/characters_router.py`` docstring or
+``.agent/rules/neko-guide.md`` (§"API URL 末尾不带斜杠") for the rationale;
+enforced by ``scripts/check_api_trailing_slash.py``.
 """
 
+import asyncio
 import json
 import os
 import re
@@ -23,7 +43,7 @@ from fastapi.responses import JSONResponse
 
 from .shared_state import get_config_manager
 from .workshop_router import get_subscribed_workshop_items
-from utils.file_utils import atomic_write_json
+from utils.file_utils import atomic_write_json_async
 from utils.logger_config import get_module_logger
 
 router = APIRouter(prefix="/api/model/mmd", tags=["mmd"])
@@ -46,7 +66,7 @@ RESERVED_DIRS = {'animation', 'emotion_config'}
 
 
 def safe_mmd_path(mmd_dir: Path, filename: str, subdir: str | None = None) -> tuple[Path | None, str]:
-    """安全地构造和验证 MMD 目录内的路径，防止路径穿越攻击。"""
+    """Safely construct and validate paths inside the MMD directory, preventing path traversal attacks."""
     try:
         if subdir:
             target_path = mmd_dir / subdir / filename
@@ -74,7 +94,7 @@ def safe_mmd_path(mmd_dir: Path, filename: str, subdir: str | None = None) -> tu
 
 
 def _ensure_mmd_directory(config_mgr) -> Path | None:
-    """确保 MMD 用户目录存在，返回目录路径。"""
+    """Ensure the MMD user directory exists and return its path."""
     try:
         mmd_dir = config_mgr.mmd_dir
         mmd_dir.mkdir(parents=True, exist_ok=True)
@@ -98,7 +118,7 @@ def _ensure_mmd_directory(config_mgr) -> Path | None:
 #   3. 对解码后的文件名进行清理（保留中文/日文），避免操作系统非法字符
 
 def _detect_zip_encoding(zf: zipfile.ZipFile) -> str | None:
-    """检测 ZIP 压缩包中非 UTF-8 条目的实际文件名编码（严格限制在中日韩范围）。"""
+    """Detect the actual filename encoding of non-UTF-8 entries in a ZIP archive (strictly limited to CJK encodings)."""
     non_utf8_infos = [info for info in zf.infolist() if not (info.flag_bits & 0x800)]
     if not non_utf8_infos:
         return None
@@ -150,7 +170,7 @@ def _detect_zip_encoding(zf: zipfile.ZipFile) -> str | None:
 
 
 def _sanitize_filename(filename: str) -> str:
-    """清理文件名，将反斜杠转为正斜杠保留目录结构，并移除非法字符。"""
+    """Sanitize a filename: convert backslashes to forward slashes to preserve directory structure, and strip illegal characters."""
     # 接受 CodeRabbit 建议：先将 Windows 风格的反斜杠统一转为 Web/Linux 标准的正斜杠
     normalized = filename.replace('\\', '/')
     # 按目录层级拆分，清理每一层，再拼装回去
@@ -161,7 +181,7 @@ def _sanitize_filename(filename: str) -> str:
 
 
 def _build_zip_name_map(zf: zipfile.ZipFile) -> dict[str, str]:
-    """为 ZIP 中所有条目构建「原始名 → 正确解码并清理后名称」的映射表。"""
+    """Build a mapping from original names to correctly decoded and sanitized names for all ZIP entries."""
     global_encoding = _detect_zip_encoding(zf)
     name_map = {}
 
@@ -222,10 +242,10 @@ def _extract_zip_with_encoding(
     target_dir: Path,
     name_map: dict[str, str]
 ):
-    """使用修正后的文件名解压 ZIP 内容。
+    """Extract ZIP contents using the corrected filenames.
 
-    逐条目提取，将文件写入 target_dir 下以 name_map 修正后的路径，
-    同时做路径越界安全检查。
+    Extracts entry by entry, writing files under target_dir at the paths
+    corrected via name_map, with path-escape safety checks along the way.
     """
     resolved_target = target_dir.resolve()
 
@@ -254,7 +274,7 @@ async def _handle_mmd_file_upload(
     file_type_name: str,
     subdir: str | None = None
 ) -> JSONResponse:
-    """处理 MMD 文件上传的通用流式逻辑。"""
+    """Common streaming logic for handling MMD file uploads."""
     try:
         if not file:
             return JSONResponse(status_code=400, content={"success": False, "error": "没有上传文件"})
@@ -349,7 +369,7 @@ async def _handle_mmd_file_upload(
 
 @router.post('/upload')
 async def upload_mmd_model(file: UploadFile = File(...)):
-    """上传 MMD 模型文件（PMX/PMD）"""
+    """Upload an MMD model file (PMX/PMD)."""
     config_mgr = get_config_manager()
     mmd_dir = _ensure_mmd_directory(config_mgr)
     if not mmd_dir:
@@ -360,7 +380,7 @@ async def upload_mmd_model(file: UploadFile = File(...)):
 
 @router.post('/upload_animation')
 async def upload_mmd_animation(file: UploadFile = File(...)):
-    """上传 VMD 动画文件"""
+    """Upload a VMD animation file."""
     config_mgr = get_config_manager()
     mmd_dir = _ensure_mmd_directory(config_mgr)
     if not mmd_dir:
@@ -371,7 +391,7 @@ async def upload_mmd_animation(file: UploadFile = File(...)):
 
 @router.post('/upload_zip')
 async def upload_mmd_zip(file: UploadFile = File(...)):
-    """上传 MMD 模型 ZIP 包（含 PMX/PMD + 纹理），自动解压到子目录。"""
+    """Upload an MMD model ZIP package (PMX/PMD + textures), automatically extracted into a subdirectory."""
     config_mgr = get_config_manager()
     mmd_dir = _ensure_mmd_directory(config_mgr)
     if not mmd_dir:
@@ -491,7 +511,7 @@ async def upload_mmd_zip(file: UploadFile = File(...)):
                     })
                 else:
                     logger.info(f"清理残留的无效模型目录: {target_dir}")
-                    shutil.rmtree(target_dir, ignore_errors=True)
+                    await asyncio.to_thread(shutil.rmtree, target_dir, ignore_errors=True)
 
             # 使用编码修正后的文件名解压
             if all(
@@ -499,18 +519,18 @@ async def upload_mmd_zip(file: UploadFile = File(...)):
                 for n in decoded_names
             ):
                 # ZIP 已含同名目录结构，直接解压到 mmd_dir
-                _extract_zip_with_encoding(zf, mmd_dir, name_map)
+                await asyncio.to_thread(_extract_zip_with_encoding, zf, mmd_dir, name_map)
             else:
                 # 解压到 target_dir
                 target_dir.mkdir(parents=True, exist_ok=True)
-                _extract_zip_with_encoding(zf, target_dir, name_map)
+                await asyncio.to_thread(_extract_zip_with_encoding, zf, target_dir, name_map)
 
         # 找到解压后的 PMX 路径
         pmx_candidates = []
         for ext in ALLOWED_MODEL_EXTENSIONS:
             pmx_candidates.extend(target_dir.rglob(f'*{ext}'))
         if not pmx_candidates:
-            shutil.rmtree(target_dir, ignore_errors=True)
+            await asyncio.to_thread(shutil.rmtree, target_dir, ignore_errors=True)
             return JSONResponse(status_code=500, content={
                 "success": False, "error": "解压后未找到模型文件"
             })
@@ -533,11 +553,11 @@ async def upload_mmd_zip(file: UploadFile = File(...)):
 
     except zipfile.BadZipFile:
         if target_dir and target_dir.exists():
-            shutil.rmtree(target_dir, ignore_errors=True)
+            await asyncio.to_thread(shutil.rmtree, target_dir, ignore_errors=True)
         return JSONResponse(status_code=400, content={"success": False, "error": "ZIP 文件损坏"})
     except Exception as e:
         if target_dir and target_dir.exists():
-            shutil.rmtree(target_dir, ignore_errors=True)
+            await asyncio.to_thread(shutil.rmtree, target_dir, ignore_errors=True)
         logger.error(f"上传 MMD ZIP 包失败: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
     finally:
@@ -554,7 +574,7 @@ async def upload_mmd_zip(file: UploadFile = File(...)):
 
 @router.get('/models')
 async def get_mmd_models():
-    """获取 MMD 模型列表（PMX/PMD），包括子目录"""
+    """List MMD models (PMX/PMD), including subdirectories."""
     try:
         config_mgr = get_config_manager()
         models = []
@@ -668,7 +688,7 @@ async def get_mmd_models():
 
 @router.get('/animations')
 def get_mmd_animations():
-    """获取 VMD 动画文件列表"""
+    """List VMD animation files."""
     try:
         config_mgr = get_config_manager()
         animations = []
@@ -717,7 +737,7 @@ def get_mmd_animations():
 
 @router.get('/config')
 def get_mmd_config():
-    """获取 MMD 路径配置"""
+    """Get the MMD path configuration."""
     return JSONResponse(content={
         "success": True,
         "paths": {
@@ -729,7 +749,7 @@ def get_mmd_config():
 
 @router.get('/emotion_mapping')
 def get_emotion_mapping(model: str = ""):
-    """获取 MMD 模型的情感映射配置"""
+    """Get the emotion mapping configuration of an MMD model."""
     try:
         config_mgr = get_config_manager()
         mmd_dir = _ensure_mmd_directory(config_mgr)
@@ -763,7 +783,7 @@ def get_emotion_mapping(model: str = ""):
 
 @router.post('/emotion_mapping')
 async def update_emotion_mapping(request: Request):
-    """更新 MMD 模型的情感映射配置"""
+    """Update the emotion mapping configuration of an MMD model."""
     try:
         data = await request.json()
         model_name = data.get('model', '')
@@ -791,7 +811,7 @@ async def update_emotion_mapping(request: Request):
         if not config_file.resolve().is_relative_to(config_path.resolve()):
             return JSONResponse(status_code=400, content={"success": False, "error": "无效的模型名称"})
 
-        atomic_write_json(config_file, mapping)
+        await atomic_write_json_async(config_file, mapping)
 
         logger.info(f"更新 MMD 情感映射: {safe_name}")
         return JSONResponse(content={"success": True, "message": "情感映射已更新"})
@@ -800,9 +820,15 @@ async def update_emotion_mapping(request: Request):
         return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
 
 
+def _count_and_rmtree(path: Path) -> int:
+    count = sum(1 for f in path.rglob('*') if f.is_file())
+    shutil.rmtree(path)
+    return count
+
+
 @router.delete('/model')
 async def delete_mmd_model(request: Request):
-    """删除 MMD 模型文件（及其所在目录中的关联资源）"""
+    """Delete an MMD model file (and the associated resources in its directory)."""
     try:
         data = await request.json()
         model_url = data.get('url', '').strip()
@@ -840,8 +866,7 @@ async def delete_mmd_model(request: Request):
                         "success": False, "error": "该目录包含模型文件，请通过模型 URL 删除"
                     })
                 # 残缺目录（无模型文件）：允许删除
-                deleted_files = sum(1 for f in candidate.rglob('*') if f.is_file())
-                shutil.rmtree(candidate)
+                deleted_files = await asyncio.to_thread(_count_and_rmtree, candidate)
                 logger.info(f"删除残缺 MMD 模型目录: {candidate}")
                 return JSONResponse(content={
                     "success": True,
@@ -869,10 +894,7 @@ async def delete_mmd_model(request: Request):
                 return JSONResponse(status_code=400, content={"success": False, "error": "路径越界"})
             if top_subdir.name.lower() in RESERVED_DIRS:
                 return JSONResponse(status_code=400, content={"success": False, "error": "不能删除保留目录"})
-            for f in top_subdir.rglob('*'):
-                if f.is_file():
-                    deleted_files += 1
-            shutil.rmtree(top_subdir)
+            deleted_files = await asyncio.to_thread(_count_and_rmtree, top_subdir)
             logger.info(f"删除 MMD 模型目录: {top_subdir} ({deleted_files} 个文件)")
         else:
             # 模型在顶层：只删除模型文件本身
@@ -901,7 +923,7 @@ async def delete_mmd_model(request: Request):
 
 @router.get('/animations/list')
 async def list_mmd_animations_for_delete(request: Request):
-    """获取可删除的 VMD 动画列表"""
+    """List VMD animations eligible for deletion."""
     try:
         config_mgr = get_config_manager()
         mmd_dir = _ensure_mmd_directory(config_mgr)
@@ -930,7 +952,7 @@ async def list_mmd_animations_for_delete(request: Request):
 
 @router.delete('/animation')
 async def delete_mmd_animation(request: Request):
-    """删除 VMD 动画文件"""
+    """Delete a VMD animation file."""
     try:
         data = await request.json()
         anim_url = data.get('url', '').strip()

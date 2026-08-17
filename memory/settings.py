@@ -1,13 +1,46 @@
+# Copyright 2025-2026 Project N.E.K.O. Team
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Legacy ``settings.json`` accessor.
+
+History
+--------
+This module originally carried two responsibilities:
+
+1. Reading/writing ``memory/{name}/settings.json``. Still in use —
+   ``memory_server.py`` and the testbench/dump tools call ``get_settings`` /
+   ``load_settings`` / ``save_settings`` to merge the legacy on-disk fields
+   into the prompt.
+2. Using an LLM to extract new settings from conversations + run LLM
+   contradiction resolution. Fully superseded by the evidence / reflection
+   pipeline — see the "old module disabled (insufficient performance)" note in
+   ``memory_server.py::process_history``; ``extract_and_update_settings`` and
+   ``detect_and_resolve_contradictions`` have no callers left.
+
+To keep these two dead methods from dragging along retired hard-coded
+constants like ``SETTING_PROPOSER_MODEL`` / ``SETTING_VERIFIER_MODEL`` (and to
+avoid carving out dead-code exceptions in the project-wide "no temperature"
+gate), this cleanup removes the LLM paths outright and keeps only the disk IO.
+If this ever truly needs reviving, follow the evidence/reflection paradigm —
+do not resurrect the old code.
+"""
 import json
-import asyncio
-from utils.llm_client import create_chat_llm
-from openai import APIConnectionError, InternalServerError, RateLimitError
-from config import SETTING_PROPOSER_MODEL, SETTING_VERIFIER_MODEL
+
 from config import CHARACTER_RESERVED_FIELDS
+from utils.cloudsave_runtime import assert_cloudsave_writable
 from utils.config_manager import get_config_manager
-from utils.token_tracker import set_call_type
-from utils.file_utils import atomic_write_json, robust_json_loads
-from config.prompts_memory import settings_extractor_prompt, settings_verifier_prompt
+from utils.file_utils import atomic_write_json
 
 
 class ImportantSettingsManager:
@@ -16,22 +49,6 @@ class ImportantSettingsManager:
         self.settings_file = None
         self._config_manager = get_config_manager()
         self._excluded_profile_fields = set(CHARACTER_RESERVED_FIELDS)
-    
-    def _get_proposer(self):
-        """动态获取Proposer LLM实例以支持配置热重载"""
-        api_config = self._config_manager.get_model_api_config('summary')
-        return create_chat_llm(
-            SETTING_PROPOSER_MODEL, api_config['base_url'],
-            api_config['api_key'], temperature=0.5,
-        )
-
-    def _get_verifier(self):
-        """动态获取Verifier LLM实例以支持配置热重载"""
-        api_config = self._config_manager.get_model_api_config('summary')
-        return create_chat_llm(
-            SETTING_VERIFIER_MODEL, api_config['base_url'],
-            api_config['api_key'], temperature=0.5,
-        )
 
     def load_settings(self):
         # It is important to update the settings with the latest character on-disk files
@@ -52,109 +69,17 @@ class ImportantSettingsManager:
                 self.settings[i] = {i: {}, self.name_mapping['human']: {}}
 
     def save_settings(self, lanlan_name):
+        assert_cloudsave_writable(
+            self._config_manager,
+            operation="save",
+            target=f"memory/{lanlan_name}/settings.json",
+        )
         atomic_write_json(
             self.settings_file[lanlan_name],
             self.settings[lanlan_name],
             indent=2,
             ensure_ascii=False,
         )
-
-    async def detect_and_resolve_contradictions(self, old_settings, new_settings, lanlan_name):
-        # 使用LLM检测矛盾并解决它们
-        prompt = settings_verifier_prompt % (json.dumps(old_settings, ensure_ascii=False), json.dumps(new_settings, ensure_ascii=False))
-        prompt = prompt.replace("{LANLAN_NAME}", lanlan_name)
-
-        retries = 0
-        max_retries = 3
-        while retries < max_retries:
-            try:
-                set_call_type("memory_settings")
-                verifier = self._get_verifier()
-                response = await verifier.ainvoke(prompt)
-                result = response.content
-                if result.startswith("```"):
-                    result = result .replace("```json", "").replace("```", "").strip()
-            except (APIConnectionError, InternalServerError, RateLimitError) as e:
-                print(f"ℹ️ 捕获到 {type(e).__name__} 错误")
-                retries += 1
-                if retries >= max_retries:
-                    print(f"❌ Setting resolver query失败，已达到最大重试次数: {e}")
-                    return old_settings
-                # 指数退避: 1, 2, 4 秒
-                wait_time = 2 ** (retries - 1)
-                print(f'⚠️ 遇到网络或429错误，等待 {wait_time} 秒后重试 (第 {retries}/{max_retries} 次)')
-                await asyncio.sleep(wait_time)
-                continue
-            except Exception as e:
-                print(f"❌ Setting resolver query出错: {e}")
-                retries += 1
-                continue
-            try:
-                merged_settings = robust_json_loads(result)
-                return merged_settings
-            except (json.JSONDecodeError, ValueError):
-                # 如果解析失败，返回新设定
-                retries += 1
-                print(f"❌ Setting resolver返回值解析失败。返回值：{response.content}")
-        return old_settings
-
-    async def extract_and_update_settings(self, messages, lanlan_name):
-        name_mapping = self.name_mapping.copy()
-        name_mapping['ai'] = lanlan_name
-        lines = []
-        for msg in messages:
-            try:
-                parts = []
-                for i in msg.content:
-                    if isinstance(i, dict):
-                        parts.append(i.get("text", f"|{i.get('type','')}|"))
-                    else:
-                        parts.append(str(i))
-                joined = "\n".join(parts)
-            except Exception:
-                joined = str(getattr(msg, 'content', ''))
-            lines.append(f"{name_mapping[msg.type]} | {joined}")
-        prompt = settings_extractor_prompt % ("\n".join(lines))
-        prompt = prompt.replace('{LANLAN_NAME}', lanlan_name)
-        prompt = prompt.replace('{MASTER_NAME}', self.name_mapping.get('human', '主人'))
-        retries = 0
-        max_retries = 3
-        new_settings = ""
-        while retries < max_retries:
-            try:
-                set_call_type("memory_settings")
-                proposer = self._get_proposer()
-                response = await proposer.ainvoke(prompt)
-            except (APIConnectionError, InternalServerError, RateLimitError) as e:
-                print(f"ℹ️ 捕获到 {type(e).__name__} 错误")
-                retries += 1
-                if retries >= max_retries:
-                    print(f"❌ Setting LLM query失败，已达到最大重试次数: {e}")
-                    return
-                # 指数退避: 1, 2, 4 秒
-                wait_time = 2 ** (retries - 1)
-                print(f'⚠️ 遇到网络或429错误，等待 {wait_time} 秒后重试 (第 {retries}/{max_retries} 次)')
-                await asyncio.sleep(wait_time)
-                continue
-            except Exception as e:
-                print(f"❌ Setting LLM query出错: {e}")
-                retries += 1
-                continue
-            try:
-                result = response.content
-                if result.startswith("```"):
-                    result = result .replace("```json", "").replace("```", "").strip()
-                new_settings = robust_json_loads(result)
-            except (json.JSONDecodeError, ValueError):
-                print(f"❌ Setting LLM返回的设定JSON解析失败。返回值：{response.content}")
-                retries += 1
-            break
-
-        # 检测并解决矛盾
-        if len(new_settings)>0:
-            self.load_settings()
-            self.settings[lanlan_name] = await self.detect_and_resolve_contradictions(self.settings[lanlan_name], new_settings, lanlan_name)
-            self.save_settings(lanlan_name)
 
     def get_settings(self, lanlan_name):
         self.load_settings()

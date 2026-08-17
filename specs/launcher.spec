@@ -2,12 +2,14 @@
 import sys
 import os
 import platform
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 from PyInstaller.building.build_main import Tree
 
 # 获取 spec 文件所在目录和项目根目录
 SPEC_DIR = os.path.dirname(os.path.abspath(SPEC))
 PROJECT_ROOT = os.path.dirname(SPEC_DIR)
+VERSION_INFO_PATH = os.path.join(PROJECT_ROOT, 'version_info.txt')
+ICON_PATH = os.path.join(PROJECT_ROOT, 'assets', 'icon.ico')
 
 # 切换到项目根目录，以便所有路径都是相对于根目录
 original_dir = os.getcwd()
@@ -21,6 +23,7 @@ print(f"[Build] Working from: {os.getcwd()}")
 datas = []
 binaries = []
 hiddenimports = []
+hiddenimports += collect_submodules('plugin.sdk', on_error='raise')
 
 # 收集关键包的所有内容（根据实际 import 检查）
 critical_packages = [
@@ -33,7 +36,76 @@ critical_packages = [
     'browser_use',       # browser-use agent 需要 .md 模板文件
     'pyrnnoise',         # 音频降噪，含 rnnoise.dll native 库
     'bilibili_api',      # B站弹幕/视频，含 data/*.json 资源文件
+    # memory-evidence-rfc §3.6.7: tiktoken ships per-encoding data files
+    # under tiktoken/encodings/*.tiktoken (~1.5MB each). collect_all pulls
+    # them in alongside the Rust extension; without this, utils.tokenize
+    # falls back to the heuristic counter and the §8 S13 self-check warns
+    # at first call.
+    'tiktoken',
+    'tiktoken_ext',
+    # Optional embedding runtime. Present in release/nightly build envs;
+    # skipped gracefully for source installs that do not enable vectors.
+    'onnxruntime',
+    'tokenizers',
+    # NOTE: galgame OCR packages are NOT listed here — they're auto-merged
+    # below from galgame_group_packages + galgame_main_packages so the
+    # collection list and the hard-fail sets share a single source of truth.
 ]
+
+# onnxruntime + tokenizers are only needed when the bundle ships embedding
+# weights. If the build is going to package data/embedding_models but the
+# runtime libs cannot be collected, the resulting artifact would carry
+# multi-MB of weights it cannot load — the runtime would sticky-disable
+# vectors with NO_ONNXRUNTIME at first use. Treat that combination as a
+# build error rather than a silent warning.
+embedding_runtime_packages = {'onnxruntime', 'tokenizers'}
+embedding_assets_present = os.path.isdir(
+    os.path.join(PROJECT_ROOT, 'data', 'embedding_models')
+)
+voice_turn_assets_present = os.path.isdir(
+    os.path.join(
+        PROJECT_ROOT,
+        'main_logic',
+        'asr_client',
+        'endpointing',
+        'models',
+    )
+)
+speaker_shadow_assets_present = os.path.isdir(
+    os.path.join(
+        PROJECT_ROOT,
+        'main_logic',
+        'asr_client',
+        'speaker_shadow',
+        'models',
+    )
+)
+
+# galgame OCR deps: bundling is the ONLY path post-refactor (in-app install
+# routes were removed). Two distinct failure modes get distinct diagnostics:
+#
+#   - galgame_group_packages: live in [dependency-groups] galgame in
+#     pyproject.toml. Failure means maintainer ran plain `uv sync` instead
+#     of `uv sync --group galgame` — the actionable fix is the group sync.
+#     rapidocr_onnxruntime is provided by the local rapidocr-pillow fork, which
+#     removes the old opencv/shapely dependency chain.
+#
+#   - galgame_main_packages: live in [project.dependencies]. They're always
+#     installed by default `uv sync`; failure here means the main venv state
+#     is broken (interrupted install, manual deletion, etc) — actionable
+#     fix is recreating the venv. `dxcam` is in this set only on Windows
+#     (PEP 508 sys_platform marker keeps it out of macOS/Linux installs).
+galgame_group_packages = {'rapidocr_onnxruntime', 'pyclipper'}
+galgame_main_packages = {'mss'}
+if sys.platform == 'win32':
+    galgame_main_packages = galgame_main_packages | {'dxcam'}
+
+# Auto-merge galgame deps into the collection list so the sets above stay the
+# single source of truth — adding a package to either set automatically keeps
+# the bundling guard and the collection step in sync, no risk of drift.
+critical_packages.extend(
+    sorted((galgame_group_packages | galgame_main_packages) - set(critical_packages))
+)
 
 for pkg in critical_packages:
     try:
@@ -42,6 +114,32 @@ for pkg in critical_packages:
         binaries += tmp_ret[1]
         hiddenimports += tmp_ret[2]
     except Exception as e:
+        if pkg in embedding_runtime_packages and (
+            embedding_assets_present
+            or (pkg == 'onnxruntime' and voice_turn_assets_present)
+            or (pkg == 'onnxruntime' and speaker_shadow_assets_present)
+        ):
+            raise RuntimeError(
+                f"Cannot collect {pkg!r}, but packaged model assets require it. "
+                "Install with "
+                "`uv sync` or remove the embedding "
+                "voice-turn, or speaker-shadow assets directory before building."
+            ) from e
+        if pkg in galgame_group_packages:
+            raise RuntimeError(
+                f"Cannot collect {pkg!r}, required for the bundled galgame "
+                "OCR pipeline. Run `uv sync --group galgame` before building "
+                "(see pyproject.toml [dependency-groups] galgame). Packaged "
+                "dist has no runtime install fallback to recover from this."
+            ) from e
+        if pkg in galgame_main_packages:
+            raise RuntimeError(
+                f"Cannot collect {pkg!r}, a [project.dependencies] entry "
+                "required by the bundled galgame OCR pipeline. Default "
+                "`uv sync` should have installed it — your venv is in a "
+                "broken state. Recreate the venv (`uv sync` from a clean "
+                "`.venv`) before building."
+            ) from e
         print(f"Warning: Could not collect {pkg}: {e}")
 
 # 添加配置文件（只添加 .json 文件，不包含 .py 代码）
@@ -52,6 +150,15 @@ for json_file in config_json_files:
     print(f"  - {json_file}")
     # 使用绝对路径，目标路径为 'config'
     datas.append((json_file, 'config'))
+
+# 本地化角色种子模板（config/characters/<lang>.json）— 首次创建 characters.json 时
+# 由 ConfigManager._get_localized_characters_source 按语言挑选拷贝；不进 config/*.json
+# 顶层 glob，所以单独打包到 config/characters/ 子目录。
+config_characters_files = glob.glob(os.path.join(PROJECT_ROOT, 'config/characters/*.json'))
+print(f"[Build] Packing {len(config_characters_files)} localized character templates:")
+for json_file in config_characters_files:
+    print(f"  - {json_file}")
+    datas.append((json_file, 'config/characters'))
 
 # 添加项目目录和文件（使用绝对路径）
 # 受版权保护的 live2d 模型打包到 _internal（用户不可见）
@@ -71,47 +178,51 @@ def add_data(src, dest):
     else:
         print(f"[Build] Warning: {src_path} not found, skipping")
 
-add_data('static/css', 'static/css')
-add_data('static/js', 'static/js')
-add_data('static/fonts', 'static/fonts')
-add_data('static/vrm', 'static/vrm')
-add_data('static/mao_pro', 'static/mao_pro')
-add_data('static/ziraitikuwa', 'static/ziraitikuwa') 
-add_data('static/libs', 'static/libs')
-add_data('static/icons', 'static/icons')
-add_data('static/locales', 'static/locales')
-add_data('static/neko', 'static/neko')
-add_data('static/kemomimi', 'static/kemomimi')
-add_data('static/default', 'static/default')
-add_data('static/*.js', 'static')
-add_data('static/*.json', 'static')
-add_data('static/*.ico', 'static')
-add_data('static/*.png', 'static')
+# static/ 整目录收录，与 Nuitka 链路（build-desktop.yml 的
+# --include-data-dir=static=static）语义对齐。此前是子目录白名单 +
+# 根级 glob，static/ 整理系列（#2268/#2271/#2275/#2277 等）把根级
+# *.js 搬进 live2d/ mmd/ avatar/ app/ 等子目录后白名单收不到，打包版
+# 会 404；白名单也一直缺 mmd/ tutorial/ react/ sounds/ 等既有目录。
+add_data('static', 'static')
 add_data('assets', 'assets')
 add_data('templates', 'templates')
 add_data('data/browser_use_prompts', 'data/browser_use_prompts')
+# tiktoken o200k_base is fetched on first use into TIKTOKEN_CACHE_DIR.
+# launcher.py points TIKTOKEN_CACHE_DIR at data/tiktoken_cache when it
+# exists in the bundle (PR #929). The CI build warms this dir before
+# packaging; for local source builds add_data warns and skips silently.
+add_data('data/tiktoken_cache', 'data/tiktoken_cache')
+add_data('data/embedding_models', 'data/embedding_models')
+add_data(
+    'main_logic/asr_client/endpointing/models',
+    'main_logic/asr_client/endpointing/models',
+)
+add_data(
+    'main_logic/asr_client/speaker_shadow/models',
+    'main_logic/asr_client/speaker_shadow/models',
+)
 add_data('steam_appid.txt', '.')
 
-# 添加 Steam 相关的 DLL 和库文件（必须放在根目录）
+# 添加 Steam 相关的 DLL 和库文件（源文件位于 steamworks/，打包后放在根目录）
 # macOS 上使用 dylib，Windows 上使用 dll
 if sys.platform == 'darwin':
     # macOS (Apple Silicon) 使用 .dylib
-    libsteam_api = os.path.join(PROJECT_ROOT, 'libsteam_api.dylib')
-    libSteamworksPy = os.path.join(PROJECT_ROOT, 'SteamworksPy.dylib')
+    libsteam_api = os.path.join(PROJECT_ROOT, 'steamworks', 'libsteam_api.dylib')
+    libSteamworksPy = os.path.join(PROJECT_ROOT, 'steamworks', 'SteamworksPy.dylib')
     if os.path.exists(libsteam_api):
         binaries.append((libsteam_api, '.'))
     if os.path.exists(libSteamworksPy):
         binaries.append((libSteamworksPy, '.'))
 elif sys.platform == 'win32':
     # Windows 使用 .dll
-    steam_api_dll = os.path.join(PROJECT_ROOT, 'steam_api64.dll')
-    steamworks_dll = os.path.join(PROJECT_ROOT, 'SteamworksPy64.dll')
+    steam_api_dll = os.path.join(PROJECT_ROOT, 'steamworks', 'steam_api64.dll')
+    steamworks_dll = os.path.join(PROJECT_ROOT, 'steamworks', 'SteamworksPy64.dll')
     if os.path.exists(steam_api_dll):
         binaries.append((steam_api_dll, '.'))
     if os.path.exists(steamworks_dll):
         binaries.append((steamworks_dll, '.'))
     # 添加 steam_api64.lib（如果存在，供编译时使用）
-    steam_lib = os.path.join(PROJECT_ROOT, 'steam_api64.lib')
+    steam_lib = os.path.join(PROJECT_ROOT, 'steamworks', 'steam_api64.lib')
     if os.path.exists(steam_lib):
         binaries.append((steam_lib, '.'))
 
@@ -174,17 +285,19 @@ hiddenimports += [
     'requests',
     'cachetools',
     
-    # 项目主模块
-    'main_server',
-    'memory_server',
-    'agent_server',
-    'monitor',
-    
+    # 项目主模块（统一在 app/ 子包下）
+    'app',
+    'app.main_server',
+    'app.memory_server',
+    'app.agent_server',
+    'app.monitor',
+
     # config 子模块
     'config',
     'config.api',
-    'config.prompts_sys',
-    'config.prompts_chara',
+    'config.prompts',
+    'config.prompts.prompts_sys',
+    'config.prompts.prompts_chara',
     
     # brain 子模块
     'brain',
@@ -197,6 +310,7 @@ hiddenimports += [
     
     # main_logic 子模块
     'main_logic',
+    'main_logic._module_state_proxy',
     'main_logic.core',
     'main_logic.cross_server',
     'main_logic.omni_offline_client',
@@ -230,7 +344,9 @@ hiddenimports += [
     'utils.config_manager',
     'utils.frontend_utils',
     'utils.logger_config',
+    'utils.parent_guard',
     'utils.preferences',
+    'utils.single_instance',
     'utils.web_scraper',
     
     # Steam 相关模块
@@ -265,11 +381,6 @@ hiddenimports += [
     'plugin.core.state',
     'plugin.runtime',
     'plugin.sdk',
-    'plugin.sdk.base',
-    'plugin.sdk.decorators',
-    'plugin.sdk.events',
-    'plugin.sdk.logger',
-    'plugin.sdk.version',
     'plugin.server',
     'plugin.server.exceptions',
     'plugin.server.lifecycle',
@@ -311,8 +422,9 @@ exe = EXE(
     target_arch=platform.machine() if sys.platform == 'darwin' else None,  # 自动检测 macOS 架构 (arm64/x86_64)
     codesign_identity=None,
     entitlements_file=None,
-    icon='assets/icon.ico' if sys.platform == 'win32' else None,  # macOS 暂不使用图标
-    version='version_info.txt' if sys.platform == 'win32' else None,  # 添加版本信息减少误报
+    icon=ICON_PATH if sys.platform == 'win32' else None,  # macOS 暂不使用图标
+    version=VERSION_INFO_PATH if sys.platform == 'win32' and os.path.isfile(VERSION_INFO_PATH) else None,
+    # 本地 version_info.txt 未生成时保持可构建；仅跳过 Windows 版本资源。
 )
 
 # 使用 COLLECT 创建目录模式分发包

@@ -1,75 +1,32 @@
 # Model Configuration
 
-N.E.K.O. uses different AI models for different tasks. Each can be individually configured.
+N.E.K.O. resolves models by **role**, not through one global model string. The selected profile supplies defaults; supported values in `core_config.json` can override individual roles.
 
-## Model roles
+| Role | Runtime field |
+| --- | --- |
+| Core | `CORE_MODEL` |
+| Conversation | `CONVERSATION_MODEL` |
+| Summary | `SUMMARY_MODEL` |
+| Correction | `CORRECTION_MODEL` |
+| Emotion | `EMOTION_MODEL` |
+| Vision | `VISION_MODEL` |
+| Agent | `AGENT_MODEL` |
+| Realtime | `REALTIME_MODEL` |
+| TTS | `TTS_MODEL` |
 
-| Role | Default | Env var | Purpose |
-|------|---------|---------|---------|
-| Conversation | `qwen-max` | - | Character chat (offline mode) |
-| Summary | `qwen-plus` | `NEKO_SUMMARY_MODEL` | Conversation summarization |
-| Correction | `qwen-max` | `NEKO_CORRECTION_MODEL` | Text correction |
-| Emotion | `qwen-flash` | `NEKO_EMOTION_MODEL` | Emotion analysis for expressions |
-| Vision | `qwen3-vl-plus-2025-09-23` | `NEKO_VISION_MODEL` | Image/screenshot understanding |
-| Agent | `qwen3.5-plus` | `NEKO_AGENT_MODEL` | Agent task execution |
-| Router | `qwen-plus` | `NEKO_ROUTER_MODEL` | Memory routing decisions |
-| Semantic | `text-embedding-v4` | `NEKO_SEMANTIC_MODEL` | Text embeddings for memory |
-| Reranker | `qwen-plus` | `NEKO_RERANKER_MODEL` | Search result reranking |
-| Setting proposer | `qwen-max` | `NEKO_SETTING_PROPOSER_MODEL` | Proposing setting updates |
-| Setting verifier | `qwen-max` | `NEKO_SETTING_VERIFIER_MODEL` | Verifying setting updates |
+Feature code may derive additional role values from these settings.
 
-## Custom model endpoints
+## Recommended flow
 
-Each model role can use a custom API endpoint. This is configured in `core_config.json` or via the Web UI:
+1. Select Core and Assist providers in the Web UI.
+2. Enter credentials for the selected providers.
+3. Run the UI connectivity checks.
+4. Only then configure a supported per-role model, URL, or key.
 
-```json
-{
-  "conversationModel": "custom-model-name",
-  "conversationModelUrl": "https://custom-api.example.com/v1",
-  "conversationModelApiKey": "sk-xxxxx"
-}
-```
+A saved resolved provider URL is reused only while it remains in the current profile's candidate set.
 
-When a custom URL/key is set, it overrides the global assist API provider for that specific role.
+## Avoid catalog snapshots
 
-## Computer Use models
+Model IDs, endpoints, thinking controls, token limits, and voice catalogs are provider-specific and change over time. Use the Web UI and `config/api_providers.json` from the same revision as the running app. Examples are not compatibility promises.
 
-Computer Use requires two vision models:
-
-| Role | Default | Purpose |
-|------|---------|---------|
-| Planning model | `qwen3-vl-plus-2025-09-23` | Analyze screenshots and plan actions |
-| Grounding model | `qwen3-vl-plus-2025-09-23` | Locate UI elements for clicking |
-
-Configure via `core_config.json`:
-
-```json
-{
-  "computerUseModel": "qwen3-vl-plus-2025-09-23",
-  "computerUseModelUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-  "computerUseModelApiKey": "sk-xxxxx",
-  "computerUseGroundModel": "qwen3-vl-plus-2025-09-23",
-  "computerUseGroundUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-  "computerUseGroundApiKey": "sk-xxxxx"
-}
-```
-
-## Thinking mode configuration
-
-Some models support "thinking" or "extended reasoning" modes. N.E.K.O. disables these by default for faster responses. The disable format varies by provider:
-
-| Provider | Disable format |
-|----------|---------------|
-| Qwen, Step, DeepSeek | `{"enable_thinking": false}` |
-| GLM | `{"thinking": {"type": "disabled"}}` |
-| Gemini 2.x | `{"thinking_config": {"thinking_budget": 0}}` |
-| Gemini 3.x | `{"thinking_config": {"thinking_level": "low"}}` |
-
-This is handled automatically in `config/__init__.py` based on the model name.
-
-## Image rate limiting
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `NATIVE_IMAGE_MIN_INTERVAL` | 1.5s | Minimum interval between screen captures |
-| `IMAGE_IDLE_RATE_MULTIPLIER` | 5x | Multiplier when no voice activity |
+Adding a role or field requires synchronized loader, config-manager, router/UI, tests, and all eight locale files. Do not silently pass unsupported parameters; model wrappers deliberately omit options incompatible with reasoning/extended-thinking APIs.

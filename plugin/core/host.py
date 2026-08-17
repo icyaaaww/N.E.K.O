@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import copy
 import importlib
+import importlib.machinery
+import importlib.util
 import inspect
 import multiprocessing
 import os
@@ -10,17 +12,19 @@ import sys
 import threading
 import time
 import hashlib
+import types
 import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional, Type
 
-from loguru import logger
+from plugin.logging_config import logger
 
 from plugin._types.events import EVENT_META_ATTR
+from plugin.core.entry_points import normalize_plugin_entry_point
 from plugin.sdk import PERSIST_ATTR
 from plugin.core.state import state
 from plugin.core.context import PluginContext
-from plugin.core.communication import PluginCommunicationResourceManager
+from plugin.core.communication import PluginCommunicationResourceManager, STARTUP_RESULT_REQ_ID
 from plugin._types.models import HealthCheckResponse
 from plugin._types.exceptions import (
     PluginLifecycleError,
@@ -34,8 +38,10 @@ from plugin.settings import (
     PROCESS_SHUTDOWN_TIMEOUT,
     PROCESS_TERMINATE_TIMEOUT,
 )
-from plugin.sdk.shared.core.entry_runtime import resolve_entry_timeout
+from plugin.sdk.shared.core.entry_runtime import prepare_entry_kwargs, resolve_entry_timeout
+from plugin.sdk.shared.core.result_contract import model_schema_from_type
 from plugin.sdk.shared.core.router import PluginRouter
+from plugin.sdk.plugin.ui import UI_ACTION_META_ATTR, UI_CONTEXT_META_ATTR
 from plugin.core.bus.types import dispatch_bus_change
 from plugin.core.zmq_transport import (
     HostTransport, ChildTransport, CH_CMD, CH_RES, CH_STS, CH_MSG, CH_COMM, CH_RESP,
@@ -54,169 +60,34 @@ def _sanitize_plugin_id(raw: Any, max_len: int = 64) -> str:
     return safe
 
 
-_TIMEOUT_UNSET = object()
+def _resolve_current_storage_layout() -> dict[str, Any]:
+    from utils.config_manager import get_config_manager
+    from utils.storage_layout import resolve_storage_layout
+
+    return resolve_storage_layout(get_config_manager())
 
 
-def _inject_extensions(
-    instance: Any,
-    host_plugin_id: str,
-    host_config_path: Path,
-    logger: Any,
-    extension_configs: list | None = None,
-) -> None:
-    """扫描所有 type=extension 且 host.plugin_id 匹配的插件，注入其 Router 到宿主实例。
-
-    在宿主子进程内部调用，发生在 instance 创建后、collect_entries 之前。
-    Extension 的 entry 指向一个 PluginRouter 子类，实例化后通过 include_router 注入。
-
-    如果 *extension_configs* 不为空，直接使用预构建的映射（避免全量扫描 TOML）。
-    每个元素格式: {"ext_id": str, "ext_entry": str, "prefix": str}
-    """
-    # 如果主进程已预构建映射，直接使用
-    if extension_configs:
-        injected_count = 0
-        for ext_cfg in extension_configs:
-            ext_id = ext_cfg.get("ext_id", "unknown")
-            ext_entry = ext_cfg.get("ext_entry", "")
-            prefix = ext_cfg.get("prefix", "")
-            if not ext_entry or ":" not in ext_entry:
-                logger.warning("[Extension] Pre-built config for '{}' has invalid entry, skipping", ext_id)
-                continue
-            module_path, class_name = ext_entry.split(":", 1)
-            try:
-                mod = importlib.import_module(module_path)
-                router_cls = getattr(mod, class_name)
-            except Exception as e:
-                logger.warning("[Extension] Failed to import extension '{}': {}", ext_id, e)
-                continue
-            if not (isinstance(router_cls, type) and issubclass(router_cls, PluginRouter)):
-                logger.warning("[Extension] '{}' is not a PluginRouter subclass, skipping", ext_id)
-                continue
-            try:
-                router_instance = router_cls(prefix=prefix, name=ext_id)
-                instance.include_router(router_instance)
-                injected_count += 1
-                logger.info("[Extension] Injected '{}' into host '{}' (pre-built)", ext_id, host_plugin_id)
-            except Exception as e:
-                logger.warning("[Extension] Failed to inject '{}': {}", ext_id, e)
-        if injected_count > 0:
-            logger.info("[Extension] Total {} extension(s) injected into host '{}'", injected_count, host_plugin_id)
-        return
+def _refresh_child_storage_layout_env(logger_obj: Any) -> None:
     try:
-        import tomllib
-    except ModuleNotFoundError:
-        try:
-            import tomli as tomllib  # type: ignore[no-redef]
-        except ImportError:
-            logger.debug("[Extension] tomllib/tomli not available, skipping extension injection")
-            return
+        from utils.storage_layout import export_storage_layout_to_env
 
-    # 优先使用 settings 中的插件根目录集合，回退到路径推导
-    try:
-        from plugin.settings import PLUGIN_CONFIG_ROOTS
-        plugin_config_roots = tuple(PLUGIN_CONFIG_ROOTS)
-    except Exception:
-        plugin_config_roots = (host_config_path.parent.parent,)
-
-    injected_count = 0
-    for plugin_config_root in plugin_config_roots:
-        try:
-            root = plugin_config_root.resolve()
-        except Exception:
-            root = plugin_config_root
-
-        try:
-            if not root.exists():
-                continue
-        except Exception:
-            continue
-
-        for toml_path in root.glob("*/plugin.toml"):
-            try:
-                with toml_path.open("rb") as f:
-                    conf = tomllib.load(f)
-                pdata = conf.get("plugin") or {}
-
-                # 只处理 type=extension
-                if pdata.get("type") != "extension":
-                    continue
-
-                # 检查宿主匹配
-                host_conf = pdata.get("host")
-                if not isinstance(host_conf, dict):
-                    continue
-                if host_conf.get("plugin_id") != host_plugin_id:
-                    continue
-
-                # 检查 enabled
-                runtime_cfg = conf.get("plugin_runtime")
-                if isinstance(runtime_cfg, dict):
-                    from plugin.utils import parse_bool_config
-                    if not parse_bool_config(runtime_cfg.get("enabled"), default=True):
-                        logger.debug(
-                            "[Extension] Extension '{}' is disabled, skipping",
-                            pdata.get("id", "?"),
-                        )
-                        continue
-
-                ext_id = pdata.get("id", "unknown")
-                ext_entry = pdata.get("entry")
-                if not ext_entry or ":" not in ext_entry:
-                    logger.warning(
-                        "[Extension] Extension '{}' has invalid entry '{}', skipping",
-                        ext_id, ext_entry,
-                    )
-                    continue
-
-                # 导入 Extension Router 类
-                module_path, class_name = ext_entry.split(":", 1)
-                try:
-                    mod = importlib.import_module(module_path)
-                    router_cls = getattr(mod, class_name)
-                except (ImportError, ModuleNotFoundError) as e:
-                    logger.warning(
-                        "[Extension] Failed to import extension '{}' ({}): {}",
-                        ext_id, ext_entry, e,
-                    )
-                    continue
-                except AttributeError as e:
-                    logger.warning(
-                        "[Extension] Class '{}' not found in module '{}' for extension '{}': {}",
-                        class_name, module_path, ext_id, e,
-                    )
-                    continue
-
-                # 验证是 PluginRouter 子类
-                if not (isinstance(router_cls, type) and issubclass(router_cls, PluginRouter)):
-                    logger.warning(
-                        "[Extension] Extension '{}' entry class '{}' is not a PluginRouter subclass, skipping",
-                        ext_id, class_name,
-                    )
-                    continue
-
-                # 实例化并注入
-                prefix = host_conf.get("prefix", "")
-                try:
-                    router_instance = router_cls(prefix=prefix, name=ext_id)
-                    instance.include_router(router_instance)
-                    injected_count += 1
-                    logger.info(
-                        "[Extension] Injected extension '{}' into host '{}' with prefix '{}'",
-                        ext_id, host_plugin_id, prefix,
-                    )
-                except Exception as e:
-                    logger.warning(
-                        "[Extension] Failed to inject extension '{}' into host '{}': {}",
-                        ext_id, host_plugin_id, e,
-                    )
-            except Exception as e:
-                logger.debug("[Extension] Error processing {}: {}", toml_path, e)
-
-    if injected_count > 0:
-        logger.info(
-            "[Extension] Total {} extension(s) injected into host '{}'",
-            injected_count, host_plugin_id,
+        layout = _resolve_current_storage_layout()
+        export_storage_layout_to_env(layout)
+        logger_obj.debug(
+            "Plugin child storage layout env refreshed: selected_root={}, anchor_root={}, source={}",
+            layout.get("selected_root"),
+            layout.get("anchor_root"),
+            layout.get("source"),
         )
+    except Exception as exc:
+        logger_obj.warning(
+            "Failed to refresh plugin child storage layout env; plugin data root may use fallback: err_type={}, err={}",
+            type(exc).__name__,
+            str(exc),
+        )
+
+
+_TIMEOUT_UNSET = object()
 
 
 # ============================================================================
@@ -224,94 +95,50 @@ def _inject_extensions(
 # ============================================================================
 
 def _setup_plugin_logger(plugin_id: str, project_root: Path) -> Any:
-    """
-    配置插件进程的 loguru logger。
-    
+    """配置插件子进程的 logger（走本体 RobustLoggerConfig，落到 我的文档/N.E.K.O/logs/）。
+
+    NOTE: 不要再引入 loguru / 不要再用 cwd 推日志目录 / 不要再造 FileHandler。
+    见 plugin/logging_config.py 顶部警告。
+
     Args:
         plugin_id: 插件 ID
-        project_root: 项目根目录
-    
+        project_root: 项目根目录（用于注入 sys.path）
+
     Returns:
-        配置好的 logger 实例
+        PluginLoggerAdapter，已绑定 plugin_id。
     """
-    from loguru import logger
-    from plugin.logging_config import get_plugin_format_console, get_plugin_format_file
-    
-    # 移除默认 handler，绑定插件 ID
-    logger.remove()
-    logger = logger.bind(plugin_id=plugin_id)
-    
-    # 添加控制台输出（使用统一格式）
     safe_pid = _sanitize_plugin_id(plugin_id)
-    logger.add(
-        sys.stdout,
-        format=get_plugin_format_console(safe_pid),
-        level="INFO",
-        colorize=True,
-        enqueue=False,
-    )
-    
-    # 添加文件输出（使用统一格式）
-    log_dir = project_root / "log" / "plugins" / safe_pid
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / f"{safe_pid}_{time.strftime('%Y%m%d_%H%M%S')}.log"
-    logger.add(
-        str(log_file),
-        format=get_plugin_format_file(safe_pid),
-        level="INFO",
-        rotation="10 MB",
-        retention=10,
-        encoding="utf-8",
-    )
-    
-    return logger
+    # 让 plugin/logging_config.get_logger() 能算出正确的 service namespace。
+    os.environ["NEKO_PLUGIN_SERVICE_NAME"] = f"Plugin_{safe_pid}"
+
+    # 子进程要先把项目根加到 sys.path，否则下面 import utils.logger_config 会失败。
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+
+    try:
+        from utils.logger_config import setup_logging as _bootstrap_setup_logging
+        _bootstrap_setup_logging(
+            service_name=f"Plugin_{safe_pid}",
+            silent=True,
+            # plugin 子进程日志统一收纳到 logs/plugin/，别跟 PluginServer /
+            # Main / Memory / Agent 等宿主进程日志混在 logs/ 顶层。
+            log_subdir="plugin",
+        )
+    except Exception:
+        # RobustLoggerConfig 自己会做多级 fallback；这里只兜底，不要遮蔽根因。
+        pass
+
+    from plugin.logging_config import get_logger
+    return get_logger(f"plugin.{safe_pid}").bind(plugin_id=plugin_id)
 
 
 def _setup_logging_interception(logger: Any, project_root: Path) -> None:
+    """兼容性 no-op：本体即 stdlib logging，不需要拦截。
+
+    保留函数签名以避免老调用者破坏。仅做一件事：确保 project_root 在 sys.path。
     """
-    设置标准库 logging 拦截，转发到 loguru。
-    
-    Args:
-        logger: loguru logger 实例
-        project_root: 项目根目录
-    """
-    import logging
-    
-    # 确保项目根目录在 path 中
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
-    
-    logger.debug("[Plugin Process] Resolved project_root: {}", project_root)
-    logger.debug("[Plugin Process] Python path (head): {}", sys.path[:3])
-    
-    # 尝试使用项目的 InterceptHandler
-    handler_cls: Optional[Type[logging.Handler]] = None
-    try:
-        import utils.logger_config as _lc
-        handler_cls = getattr(_lc, "InterceptHandler", None)
-    except Exception:
-        handler_cls = None
-    
-    if handler_cls is None:
-        class _InterceptHandler(logging.Handler):
-            def emit(self, record: logging.LogRecord) -> None:
-                try:
-                    level = record.levelname
-                    msg = record.getMessage()
-                    logger.opt(exception=record.exc_info).log(level, msg)
-                except Exception:
-                    pass
-        handler_cls = _InterceptHandler
-    
-    logging.basicConfig(handlers=[handler_cls()], level=0, force=True)
-    
-    # 设置 uvicorn/fastapi logger
-    for logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access", "fastapi"):
-        logging_logger = logging.getLogger(logger_name)
-        logging_logger.handlers = [handler_cls()]
-        logging_logger.propagate = False
-    
-    logger.debug("[Plugin Process] Standard logging intercepted and redirected to loguru")
 
 
 def _find_project_root(config_path: Path) -> Path:
@@ -358,38 +185,187 @@ def _find_project_root(config_path: Path) -> Path:
         return config_path.parent.resolve()
 
 
-def _check_extension_type_guard(config_path: Path, plugin_id: str, logger: Any) -> bool:
-    """
-    检查插件是否是 Extension 类型（不应作为独立进程运行）。
-    
-    Args:
-        config_path: 配置文件路径
-        plugin_id: 插件 ID
-        logger: 日志记录器
-    
-    Returns:
-        True 如果是 Extension 类型（应退出），False 否则
-    """
+def _prepare_child_plugin_import_roots(logger: Any) -> None:
+    """Mirror registry import roots inside plugin child processes."""
+
     try:
+        from plugin.settings import BUILTIN_PLUGIN_CONFIG_ROOT, PLUGIN_CONFIG_ROOTS
+    except Exception as exc:
+        logger.debug("[Plugin Process] Failed to load plugin config roots: {}", exc)
+        return
+
+    try:
+        builtin_root = BUILTIN_PLUGIN_CONFIG_ROOT.resolve()
+    except Exception:
+        builtin_root = BUILTIN_PLUGIN_CONFIG_ROOT
+
+    for plugin_config_root in PLUGIN_CONFIG_ROOTS:
         try:
-            import tomllib as _tomllib
-        except ModuleNotFoundError:
-            import tomli as _tomllib  # type: ignore[no-redef]
-        
-        with config_path.open("rb") as _f:
-            _conf = _tomllib.load(_f)
-        
-        if _conf.get("plugin", {}).get("type") == "extension":
-            logger.error(
-                "[Plugin Process] FATAL: Plugin '{}' is type='extension' and must NOT run as an independent process. "
-                "It should be injected into its host plugin. Exiting immediately.",
-                plugin_id,
-            )
-            return True
-    except Exception as _e:
-        logger.debug("[Plugin Process] Could not perform extension type guard: {}", _e)
-    
-    return False
+            root = plugin_config_root.resolve()
+        except Exception:
+            root = plugin_config_root
+
+        import_root = root.parent
+        if str(import_root) not in sys.path:
+            sys.path.insert(0, str(import_root))
+            logger.info("[Plugin Process] Added plugin import root to sys.path: {}", import_root)
+
+    repo_root = builtin_root.parent.parent
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+
+
+def _prepare_child_current_plugin_import_root(config_path: Path, logger: Any) -> None:
+    """按当前 plugin.toml 位置补充导入根，避免设置快照或路径布局差异导致用户插件不可导入。"""
+
+    try:
+        import_root = config_path.resolve().parent.parent.parent
+    except Exception as exc:
+        logger.debug("[Plugin Process] Failed to resolve current plugin import root: {}", exc)
+        return
+
+    value = str(import_root)
+    if value in sys.path:
+        return
+    sys.path.insert(0, value)
+    logger.info("[Plugin Process] Added current plugin import root to sys.path: {}", import_root)
+
+
+def _prepare_child_plugin_vendor_path(config_path: Path, logger: Any) -> None:
+    """Add the current plugin's vendor/ directory before importing its entry."""
+
+    vendor_dir = config_path.parent / "vendor"
+    if not vendor_dir.is_dir():
+        return
+
+    value = str(vendor_dir)
+    if value in sys.path:
+        return
+    sys.path.insert(0, value)
+    logger.info("[Plugin Process] Added plugin vendor path to sys.path: {}", vendor_dir)
+
+
+def _is_target_module_missing(exc: ModuleNotFoundError, module_path: str) -> bool:
+    """判断缺失的是目标插件模块本身，而不是插件内部依赖。"""
+
+    missing_name = getattr(exc, "name", None)
+    return bool(missing_name and (missing_name == module_path or module_path.startswith(f"{missing_name}.")))
+
+
+def _ensure_plugins_namespace(plugin_root: Path, logger: Any) -> None:
+    """确保顶层 plugins 命名空间能搜索当前用户插件根目录。"""
+
+    namespace_path = str(plugin_root)
+    existing = sys.modules.get("plugins")
+    if existing is None:
+        module = types.ModuleType("plugins")
+        module.__package__ = "plugins"
+        module.__path__ = [namespace_path]
+        module.__spec__ = importlib.machinery.ModuleSpec("plugins", loader=None, is_package=True)
+        if module.__spec__ is not None:
+            module.__spec__.submodule_search_locations = module.__path__
+        sys.modules["plugins"] = module
+        logger.info("[Plugin Process] Created plugins namespace for: {}", plugin_root)
+        return
+
+    namespace_paths = getattr(existing, "__path__", None)
+    if namespace_paths is None:
+        logger.debug("[Plugin Process] Existing 'plugins' module is not a package; path fallback may be required")
+        return
+
+    if namespace_path in list(namespace_paths):
+        return
+    try:
+        namespace_paths.append(namespace_path)
+    except AttributeError:
+        existing.__path__ = [*list(namespace_paths), namespace_path]
+    logger.info("[Plugin Process] Added current plugin root to plugins namespace: {}", plugin_root)
+
+
+def _import_current_plugin_from_config(module_path: str, config_path: Path, logger: Any) -> Any | None:
+    """在命名空间导入失败时，按当前 plugin.toml 同目录直接加载插件包。"""
+
+    parts = module_path.split(".")
+    if len(parts) < 2 or parts[0] != "plugins":
+        return None
+
+    try:
+        plugin_dir = config_path.resolve().parent
+    except Exception as exc:
+        logger.debug("[Plugin Process] Failed to resolve plugin directory for import fallback: {}", exc)
+        return None
+
+    if parts[1] != plugin_dir.name:
+        logger.debug(
+            "[Plugin Process] Import fallback skipped because module '{}' does not match plugin dir '{}'",
+            module_path,
+            plugin_dir.name,
+        )
+        return None
+
+    source_file = plugin_dir / "__init__.py"
+    if not source_file.is_file():
+        logger.debug("[Plugin Process] Import fallback skipped because missing file: {}", source_file)
+        return None
+
+    plugin_root = plugin_dir.parent
+    import_root = plugin_root.parent
+    if str(import_root) not in sys.path:
+        sys.path.insert(0, str(import_root))
+        logger.info("[Plugin Process] Added fallback plugin import root to sys.path: {}", import_root)
+
+    _ensure_plugins_namespace(plugin_root, logger)
+    importlib.invalidate_caches()
+
+    try:
+        return importlib.import_module(module_path)
+    except ModuleNotFoundError as exc:
+        if not _is_target_module_missing(exc, module_path):
+            raise
+
+    # 文件兜底只适用于插件包本身（plugins.<id> ↔ <id>/__init__.py）。更深的子模块路径
+    # （plugins.<id>.<sub>）已由上面的命名空间 import 覆盖；这里不能拿 __init__.py 顶替，
+    # 否则缺失/拼错的子模块会被包初始化静默冒充成功，应让其抛出真正的 ModuleNotFoundError。
+    if len(parts) != 2:
+        return None
+
+    spec = importlib.util.spec_from_file_location(
+        module_path,
+        source_file,
+        submodule_search_locations=[str(plugin_dir)],
+    )
+    if spec is None or spec.loader is None:
+        logger.debug("[Plugin Process] Import fallback could not create spec for: {}", source_file)
+        return None
+
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_path] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_path, None)
+        raise
+
+    logger.info("[Plugin Process] Loaded plugin module from current plugin directory: {}", source_file)
+    return module
+
+
+def _import_plugin_module(module_path: str, config_path: Path | None, logger: Any) -> Any:
+    """导入插件模块，并在用户插件命名空间失效时使用当前插件目录兜底。
+
+    *config_path* 为空时（例如运行时启用扩展却拿不到 plugin.toml 路径），跳过兜底，
+    退化为普通 ``import_module`` 行为。
+    """
+
+    try:
+        return importlib.import_module(module_path)
+    except ModuleNotFoundError as exc:
+        if config_path is None or not _is_target_module_missing(exc, module_path):
+            raise
+        fallback_module = _import_current_plugin_from_config(module_path, config_path, logger)
+        if fallback_module is None:
+            raise
+        return fallback_module
 
 
 async def _handle_config_update_command(
@@ -430,6 +406,10 @@ async def _handle_config_update_command(
             logger.debug("[Plugin Process] Config cache updated")
         else:
             ctx._effective_config = new_config
+
+        refresh_runtime_config = getattr(ctx, "_refresh_instance_runtime_config", None)
+        if callable(refresh_runtime_config) and isinstance(ctx._effective_config, dict):
+            refresh_runtime_config(ctx._effective_config)
         
         # 触发 config_change 生命周期事件（如果存在）
         lifecycle_events = events_by_type.get("lifecycle", {})
@@ -450,6 +430,8 @@ async def _handle_config_update_command(
                 logger.exception("[Plugin Process] config_change handler failed")
                 # 回滚配置到变更前状态
                 ctx._effective_config = old_config
+                if callable(refresh_runtime_config) and isinstance(old_config, dict):
+                    refresh_runtime_config(old_config)
                 logger.debug("[Plugin Process] Config rolled back after handler failure")
                 ret_payload["error"] = f"config_change handler failed: {e}"
                 res_sender.put(ret_payload, timeout=10.0)
@@ -515,11 +497,12 @@ def _plugin_process_runner(
     downlink_endpoint: str,
     uplink_endpoint: str,
     stop_event: Any | None = None,
-    extension_configs: list | None = None,
+    startup_options: dict[str, object] | None = None,
 ) -> None:
     """独立进程中的运行函数。通过 ZMQ 与宿主进程通信。"""
     # 保存进程级 stop event
     process_stop_event = stop_event
+    startup_failure_policy = str((startup_options or {}).get("startup_failure") or "warn").strip().lower()
     
     # 初始化：探测项目根目录、配置 logger
     project_root = _find_project_root(config_path)
@@ -531,9 +514,6 @@ def _plugin_process_runner(
     except Exception as e:
         logger.warning("[Plugin Process] Failed to setup logging interception: {}", e)
     
-    if _check_extension_type_guard(config_path, plugin_id, logger):
-        return
-
     # ── ZMQ child-side transport ─────────────────────────────────
     child_transport = ChildTransport(downlink_endpoint, uplink_endpoint)
     res_sender = child_transport.channel_sender(CH_RES)
@@ -542,6 +522,19 @@ def _plugin_process_runner(
     comm_sender = child_transport.channel_sender(CH_COMM)
 
     try:
+        _prepare_child_plugin_import_roots(logger)
+        _prepare_child_current_plugin_import_root(config_path, logger)
+        _prepare_child_plugin_vendor_path(config_path, logger)
+        try:
+            from plugin.settings import BUILTIN_PLUGIN_CONFIG_ROOT
+            entry_point = normalize_plugin_entry_point(
+                entry_point,
+                config_path=config_path,
+                builtin_plugin_root=BUILTIN_PLUGIN_CONFIG_ROOT,
+            )
+        except Exception as e:
+            logger.debug("[Plugin Process] Failed to normalize entry point: {}", e)
+
         if str(project_root) not in sys.path:
             sys.path.insert(0, str(project_root))
             logger.info("[Plugin Process] Added project root to sys.path: {}", project_root)
@@ -550,7 +543,7 @@ def _plugin_process_runner(
         
         module_path, class_name = entry_point.split(":", 1)
         logger.debug("[Plugin Process] Importing module: {}", module_path)
-        mod = importlib.import_module(module_path)
+        mod = _import_plugin_module(module_path, config_path, logger)
         cls = getattr(mod, class_name)
         logger.debug("[Plugin Process] Class loaded: {}", cls.__name__)
 
@@ -594,11 +587,13 @@ def _plugin_process_runner(
                 pass
             pass
 
-        # 防御：extension（PluginRouter 子类）不应被当作独立进程启动
+        # Router 是普通插件内部的组合单元，不能作为独立插件入口启动。
         if isinstance(cls, type) and issubclass(cls, PluginRouter):
             logger.error(
                 "[Plugin Process] Entry class '{}' is a PluginRouter subclass, not a NekoPluginBase. "
-                "This plugin should be loaded as an extension (type='extension'), not as an independent process. "
+                "Mount the router from a normal plugin with include_router(). "
+                "/ 入口类是 PluginRouter；请在普通插件中用 include_router() 挂载。"
+                "/ エントリークラスは PluginRouter です。通常プラグインから include_router() でマウントしてください。"
                 "Aborting process for plugin '{}'.",
                 cls.__name__, plugin_id,
             )
@@ -607,14 +602,21 @@ def _plugin_process_runner(
                 "plugin_id": plugin_id,
                 "status": "error",
                 "error": f"Plugin '{plugin_id}' entry is a PluginRouter, not a NekoPluginBase. "
-                         f"Set type='extension' in plugin.toml to inject it into a host plugin.",
+                         "Mount it from a normal plugin with include_router(). "
+                         "/ 请在普通插件中用 include_router() 挂载。"
+                         "/ 通常プラグインから include_router() でマウントしてください。",
             })
+            try:
+                ctx.close()
+            except Exception as e:
+                logger.debug("[Plugin Process] Context close failed after invalid router entry: {}", e)
+            try:
+                child_transport.close()
+            except Exception:
+                pass
             return
 
         instance = cls(ctx)
-
-        # 注入 Extension Router（type="extension" 且 host.plugin_id 匹配的插件）
-        _inject_extensions(instance, plugin_id, config_path, logger, extension_configs=extension_configs)
 
         # 获取 freezable 属性列表和持久化模式
         freezable_keys = getattr(instance, "__freezable__", []) or []
@@ -694,9 +696,92 @@ def _plugin_process_runner(
         entry_map: Dict[str, Any] = {}
         entry_meta_map: Dict[str, Any] = {}  # 存储 EventMeta 用于获取自定义配置（如 timeout）
         events_by_type: Dict[str, Dict[str, Any]] = {}
+        ui_context_map: Dict[str, Any] = {}
+
+        def _get_ui_context_meta(member: Any) -> dict[str, Any] | None:
+            candidates: list[Any] = [member]
+            if hasattr(member, "__func__"):
+                candidates.append(member.__func__)
+            current = getattr(member, "__wrapped__", None)
+            seen: set[int] = set()
+            while current is not None and id(current) not in seen:
+                seen.add(id(current))
+                candidates.append(current)
+                if hasattr(current, "__func__"):
+                    candidates.append(current.__func__)
+                current = getattr(current, "__wrapped__", None)
+            for candidate in candidates:
+                meta = getattr(candidate, UI_CONTEXT_META_ATTR, None)
+                if isinstance(meta, dict):
+                    return dict(meta)
+            return None
+
+        def _rebuild_ui_context_map() -> None:
+            ui_context_map.clear()
+            for _name, member in inspect.getmembers(instance, predicate=callable):
+                meta = _get_ui_context_meta(member)
+                if not meta:
+                    continue
+                context_id = str(meta.get("id") or "main").strip() or "main"
+                ui_context_map[context_id] = member
+
+        def _serialize_ui_context_result(result: Any) -> Dict[str, Any]:
+            schema: Dict[str, Any] | None = None
+            data: Any
+            model_dump = getattr(result, "model_dump", None)
+            if callable(model_dump):
+                data = model_dump()
+                schema = model_schema_from_type(type(result))
+            elif isinstance(result, (dict, list)):
+                data = result
+            else:
+                data = {"value": result}
+            return {"state": data, "state_schema": schema}
+
+        def _get_ui_action_meta(member: Any) -> dict[str, Any] | None:
+            candidates: list[Any] = [member]
+            if hasattr(member, "__func__"):
+                candidates.append(member.__func__)
+            current = getattr(member, "__wrapped__", None)
+            seen: set[int] = set()
+            while current is not None and id(current) not in seen:
+                seen.add(id(current))
+                candidates.append(current)
+                if hasattr(current, "__func__"):
+                    candidates.append(current.__func__)
+                current = getattr(current, "__wrapped__", None)
+            for candidate in candidates:
+                meta = getattr(candidate, UI_ACTION_META_ATTR, None)
+                if isinstance(meta, dict):
+                    return dict(meta)
+            return None
+
+        def _collect_ui_actions() -> list[dict[str, Any]]:
+            actions: list[dict[str, Any]] = []
+            for entry_id, handler in entry_map.items():
+                ui_meta = _get_ui_action_meta(handler)
+                if not ui_meta:
+                    continue
+                entry_meta = entry_meta_map.get(entry_id)
+                action_id = str(ui_meta.get("id") or entry_id)
+                actions.append({
+                    "id": action_id,
+                    "entry_id": entry_id,
+                    "label": ui_meta.get("label") or getattr(entry_meta, "name", entry_id),
+                    "description": getattr(entry_meta, "description", ""),
+                    "input_schema": dict(getattr(entry_meta, "input_schema", None) or {}),
+                    "icon": ui_meta.get("icon"),
+                    "tone": ui_meta.get("tone") or "default",
+                    "group": ui_meta.get("group"),
+                    "order": int(ui_meta.get("order") or 0),
+                    "confirm": ui_meta.get("confirm") or False,
+                    "refresh_context": bool(ui_meta.get("refresh_context", True)),
+                })
+            actions.sort(key=lambda item: (str(item.get("group") or ""), int(item.get("order") or 0), str(item.get("label") or item.get("id"))))
+            return actions
 
         def _rebuild_entry_map() -> None:
-            """重建 entry_map + events_by_type（Extension 注入/卸载后调用）。"""
+            """重建 entry_map 与 events_by_type。"""
             collected = instance.collect_entries(wrap_with_hooks=True)
             entry_map.clear()
             entry_meta_map.clear()
@@ -750,6 +835,9 @@ def _plugin_process_runner(
         
         ctx._entry_map = entry_map
         ctx._instance = instance
+        _rebuild_ui_context_map()
+        if ui_context_map:
+            logger.info("Plugin UI contexts collected: {}", list(ui_context_map.keys()))
 
         # asyncio.Queue fed from the downlink for plugin-to-plugin responses
         _response_inbox: asyncio.Queue = asyncio.Queue()
@@ -787,7 +875,29 @@ def _plugin_process_runner(
 
         # 生命周期：startup
         lifecycle_events = events_by_type.get("lifecycle", {})
+
+        def _send_startup_result(startup_error: str | None) -> None:
+            try:
+                startup_success = startup_error is None
+                startup_data: dict[str, Any] = {
+                    "status": "ready" if startup_success else "failed",
+                }
+                if startup_error is not None:
+                    startup_data["startup_error"] = startup_error
+                res_sender.put(
+                    {
+                        "req_id": STARTUP_RESULT_REQ_ID,
+                        "success": startup_success,
+                        "data": startup_data,
+                        "error": startup_error,
+                    },
+                    timeout=10.0,
+                )
+            except Exception:
+                logger.exception("[Plugin Process] Failed to send startup result")
+
         startup_fn = lifecycle_events.get("startup")
+        startup_error: str | None = None
         if startup_fn:
             try:
                 with ctx._handler_scope("lifecycle.startup"):
@@ -798,6 +908,7 @@ def _plugin_process_runner(
             except Exception as e:
                 error_msg = f"Error in lifecycle.startup: {str(e)}"
                 logger.exception(error_msg)
+                startup_error = error_msg
                 # 记录错误但不中断进程启动
                 # 如果启动失败是致命的，可以在这里 raise PluginLifecycleError
         
@@ -820,6 +931,19 @@ def _plugin_process_runner(
             except Exception as e:
                 error_msg = f"Error in lifecycle.unfreeze: {str(e)}"
                 logger.exception(error_msg)
+
+        _send_startup_result(startup_error)
+        if startup_error is not None and startup_failure_policy == "fail":
+            logger.info("[Plugin Process] Startup failed with policy='fail'; skipping auto-start work")
+            try:
+                ctx.close()
+            except Exception as e:
+                logger.debug("[Plugin Process] Context close failed after startup failure: {}", e)
+            try:
+                child_transport.close()
+            except Exception:
+                pass
+            return
 
         # 定时任务：timer auto_start interval
         def _run_timer_interval(fn, interval_seconds: int, fn_name: str, stop_event: threading.Event):
@@ -1032,10 +1156,17 @@ def _plugin_process_runner(
 
                 requested_timeout = msg["timeout"] if "timeout" in msg else _TIMEOUT_UNSET
                 timeout_seconds = _resolve_timeout(entry_id, requested_timeout)
+                call_args = prepare_entry_kwargs(
+                    plugin_id=plugin_id,
+                    entry_id=entry_id,
+                    handler=method,
+                    meta=entry_meta_map.get(entry_id),
+                    args=args,
+                )
 
                 with ctx._handler_scope(f"plugin_entry.{entry_id}"), ctx._run_scope(run_id):
                     result = await _run_with_watchdog(
-                        method(**args), entry_id, timeout_seconds,
+                        method(**call_args), entry_id, timeout_seconds,
                     )
 
                 if hasattr(result, "is_ok") and callable(result.is_ok):
@@ -1140,8 +1271,45 @@ def _plugin_process_runner(
                 except Exception:
                     logger.exception("Failed to send response for req_id={}", req_id)
 
+        async def _handle_ui_context(msg: dict):
+            req_id = msg.get("req_id", "unknown")
+            context_id = str(msg.get("context_id") or "main")
+            ret = {"req_id": req_id, "success": False, "data": None, "error": None}
+            try:
+                provider = ui_context_map.get(context_id)
+                if provider is None:
+                    _rebuild_ui_context_map()
+                    provider = ui_context_map.get(context_id)
+                if provider is None:
+                    ret["error"] = f"UI context '{context_id}' not found"
+                    return
+                result = provider()
+                if inspect.isawaitable(result):
+                    result = await _run_with_watchdog(result, f"ui_context.{context_id}", 5.0)
+                ret["success"] = True
+                ret["data"] = {
+                    **_serialize_ui_context_result(result),
+                    "actions": _collect_ui_actions(),
+                }
+            except Exception as e:
+                logger.exception("Failed to execute UI context '{}'", context_id)
+                ret["error"] = str(e)
+            finally:
+                try:
+                    res_sender.put(ret, timeout=10.0)
+                except Exception:
+                    logger.exception("Failed to send UI context response for req_id={}", req_id)
+
         async def _async_command_loop():
             poll_ms = int(QUEUE_GET_TIMEOUT * 1000)
+            on_command_loop_start = getattr(instance, "_on_command_loop_start", None)
+            if callable(on_command_loop_start):
+                try:
+                    result = on_command_loop_start()
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception:
+                    logger.exception("[Plugin Process] _on_command_loop_start failed")
 
             while True:
                 try:
@@ -1238,50 +1406,13 @@ def _plugin_process_runner(
                     task.add_done_callback(lambda _t, key=task_key: _run_tasks.pop(key, None))
                     continue
 
-                # ── DISABLE / ENABLE EXTENSION ──
-                if msg_type == "DISABLE_EXTENSION":
-                    ext_name = msg.get("ext_name", "")
-                    req_id = msg.get("req_id", "unknown")
-                    ret = {"req_id": req_id, "success": False, "data": None, "error": None}
-                    try:
-                        if instance.exclude_router(ext_name):
-                            _rebuild_entry_map()
-                            ret["success"] = True
-                            ret["data"] = {"disabled": ext_name}
-                        else:
-                            ret["error"] = f"Extension '{ext_name}' not found"
-                    except Exception as e:
-                        ret["error"] = str(e)
-                    res_sender.put(ret, timeout=10.0)
-                    continue
-
-                if msg_type == "ENABLE_EXTENSION":
-                    ext_id = msg.get("ext_id", "")
-                    ext_entry = msg.get("ext_entry", "")
-                    prefix = msg.get("prefix", "")
-                    req_id = msg.get("req_id", "unknown")
-                    ret = {"req_id": req_id, "success": False, "data": None, "error": None}
-                    try:
-                        existing = instance.get_router(ext_id) if hasattr(instance, "get_router") else None
-                        if existing:
-                            ret["error"] = f"Extension '{ext_id}' already injected"
-                        elif not ext_entry or ":" not in ext_entry:
-                            ret["error"] = f"Invalid ext_entry '{ext_entry}'"
-                        else:
-                            mod_path, cls_name = ext_entry.split(":", 1)
-                            mod = importlib.import_module(mod_path)
-                            router_cls = getattr(mod, cls_name)
-                            if not (isinstance(router_cls, type) and issubclass(router_cls, PluginRouter)):
-                                ret["error"] = f"'{cls_name}' is not a PluginRouter subclass"
-                            else:
-                                router_inst = router_cls(prefix=prefix, name=ext_id)
-                                instance.include_router(router_inst)
-                                _rebuild_entry_map()
-                                ret["success"] = True
-                                ret["data"] = {"enabled": ext_id}
-                    except Exception as e:
-                        ret["error"] = str(e)
-                    res_sender.put(ret, timeout=10.0)
+                # ── UI_CONTEXT ──
+                if msg_type == "UI_CONTEXT":
+                    req_id = str(msg.get("req_id") or uuid.uuid4())
+                    task_key = f"ui_context:{req_id}"
+                    task = asyncio.create_task(_handle_ui_context(msg))
+                    _run_tasks[task_key] = task
+                    task.add_done_callback(lambda _t, key=task_key: _run_tasks.pop(key, None))
                     continue
 
                 # ── TRIGGER ──
@@ -1374,7 +1505,13 @@ def _plugin_process_runner(
                 "success": False,
                 "data": None,
                 "error": f"Process crashed: {str(e)}"
-            })
+            }, timeout=10.0)
+            res_sender.put({
+                "req_id": STARTUP_RESULT_REQ_ID,
+                "success": False,
+                "data": None,
+                "error": f"Process crashed: {str(e)}"
+            }, timeout=10.0)
         except Exception:
             pass  # 如果队列也坏了，只能放弃
         raise  # 重新抛出，让进程退出
@@ -1389,7 +1526,7 @@ class PluginHost:
     - 进程间通信（通过 PluginCommunicationResourceManager）
     """
 
-    def __init__(self, plugin_id: str, entry_point: str, config_path: Path, extension_configs: list | None = None):
+    def __init__(self, plugin_id: str, entry_point: str, config_path: Path):
         self.plugin_id = plugin_id
         self.entry_point = entry_point
         self.config_path = config_path
@@ -1399,6 +1536,7 @@ class PluginHost:
         self.transport = HostTransport()
 
         self._process_stop_event: Any = multiprocessing.Event()
+        self._startup_options: dict[str, object] = {"startup_failure": "warn"}
 
         # Shared response notification primitives must be initialized before
         # forking, otherwise each child creates its own Manager proxies.
@@ -1426,7 +1564,7 @@ class PluginHost:
                 self.transport.downlink_endpoint,
                 self.transport.uplink_endpoint,
                 self._process_stop_event,
-                extension_configs,
+                self._startup_options,
             ),
             # Plugin code may spawn subprocesses/Managers; daemon process would forbid that.
             daemon=False,
@@ -1437,7 +1575,12 @@ class PluginHost:
             transport=self.transport,
         )
     
-    async def start(self, message_target_queue=None) -> None:
+    async def start(
+        self,
+        message_target_queue=None,
+        startup_timeout: float | None = None,
+        startup_failure: str = "warn",
+    ) -> Any:
         """
         启动后台任务（需要在异步上下文中调用）
         
@@ -1449,6 +1592,9 @@ class PluginHost:
         state.register_downlink_sender(self.plugin_id, self.comm_manager.send_plugin_response)
 
         await self.comm_manager.start(message_target_queue=message_target_queue)
+        should_wait_for_startup = startup_timeout is not None and startup_timeout > 0
+        startup_failure_policy = str(startup_failure or "warn").strip().lower()
+        self._startup_options["startup_failure"] = startup_failure_policy
 
         if self.process.is_alive():
             self.logger.debug(
@@ -1458,14 +1604,18 @@ class PluginHost:
             )
             return
 
+        if should_wait_for_startup:
+            await self.comm_manager.prepare_startup_wait()
+
         try:
+            _refresh_child_storage_layout_env(self.logger)
             await asyncio.to_thread(self.process.start)
         except Exception:
             self.logger.error(
                 "Plugin {} process failed to start, shutting down comm_manager",
                 self.plugin_id,
             )
-            state.unregister_downlink_sender(self.plugin_id)
+            state.remove_downlink_sender(self.plugin_id)
             try:
                 self.transport.close()
             except Exception:
@@ -1482,14 +1632,16 @@ class PluginHost:
                 self.plugin_id,
                 exitcode,
             )
-            state.unregister_downlink_sender(self.plugin_id)
+            state.remove_downlink_sender(self.plugin_id)
             try:
                 self.transport.close()
             except Exception:
                 pass
             await self.comm_manager.shutdown(timeout=PLUGIN_SHUTDOWN_TIMEOUT)
             raise PluginLifecycleError(
-                f"Plugin {self.plugin_id} failed to stay alive after startup (exitcode={exitcode})"
+                self.plugin_id,
+                "startup",
+                f"process exited immediately (exitcode={exitcode})",
             )
         else:
             self.logger.info(
@@ -1497,6 +1649,65 @@ class PluginHost:
                 self.plugin_id,
                 self.process.pid,
             )
+
+        if should_wait_for_startup:
+            try:
+                startup_result = await self.comm_manager.wait_for_startup(
+                    timeout=float(startup_timeout),
+                    allow_startup_error=startup_failure_policy != "fail",
+                )
+                if isinstance(startup_result, dict) and startup_result.get("startup_error"):
+                    self.logger.warning(
+                        "Plugin {} startup completed with warning: {}",
+                        self.plugin_id,
+                        startup_result["startup_error"],
+                    )
+                return startup_result
+            except TimeoutError as exc:
+                self.logger.error(
+                    "Plugin {} startup timed out after {}s",
+                    self.plugin_id,
+                    startup_timeout,
+                )
+                await self._abort_startup_after_failure(timeout=min(float(startup_timeout), PLUGIN_SHUTDOWN_TIMEOUT))
+                raise PluginLifecycleError(
+                    self.plugin_id,
+                    "startup",
+                    f"startup timed out after {startup_timeout}s",
+                ) from exc
+            except Exception as exc:
+                self.logger.error(
+                    "Plugin {} startup failed: {}",
+                    self.plugin_id,
+                    exc,
+                )
+                await self._abort_startup_after_failure(timeout=PLUGIN_SHUTDOWN_TIMEOUT)
+                raise PluginLifecycleError(
+                    self.plugin_id,
+                    "startup",
+                    str(exc),
+                ) from exc
+
+    async def _abort_startup_after_failure(self, timeout: float) -> None:
+        try:
+            if getattr(self, "_process_stop_event", None) is not None:
+                self._process_stop_event.set()
+        except Exception:
+            pass
+        state.remove_downlink_sender(self.plugin_id)
+        try:
+            await self.comm_manager.send_stop_command()
+        except Exception:
+            pass
+        try:
+            await self.comm_manager.shutdown(timeout=timeout)
+        except Exception:
+            pass
+        try:
+            self.transport.close()
+        except Exception:
+            pass
+        await asyncio.to_thread(self._shutdown_process, timeout)
     
     async def shutdown(self, timeout: float = PLUGIN_SHUTDOWN_TIMEOUT) -> None:
         """
@@ -1630,12 +1841,6 @@ class PluginHost:
     async def push_bus_change(self, *, sub_id: str, bus: str, op: str, delta: Dict[str, Any] | None = None) -> None:
         await self.comm_manager.push_bus_change(sub_id=sub_id, bus=bus, op=op, delta=delta)
 
-    async def send_extension_command(self, msg_type: str, payload: Dict[str, Any], timeout: float = 10.0) -> Any:
-        """向子进程发送 Extension 管理命令（DISABLE_EXTENSION / ENABLE_EXTENSION）。"""
-        req_id = str(uuid.uuid4())
-        cmd = {"type": msg_type, "req_id": req_id, **payload}
-        return await self.comm_manager._send_command_and_wait(req_id, cmd, timeout, f"extension cmd {msg_type}")
-
     async def send_config_update(
         self,
         config: Dict[str, Any],
@@ -1668,6 +1873,9 @@ class PluginHost:
             "profile": profile,
         }
         return await self.comm_manager._send_command_and_wait(req_id, cmd, timeout, "CONFIG_UPDATE")
+
+    async def get_ui_context(self, context_id: str = "main", timeout: float = 5.0) -> Any:
+        return await self.comm_manager.get_ui_context(context_id=context_id, timeout=timeout)
 
     def is_alive(self) -> bool:
         """检查进程是否存活"""

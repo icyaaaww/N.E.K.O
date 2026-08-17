@@ -9,7 +9,7 @@ docker/
 ├── Dockerfile              # Docker 镜像构建文件
 ├── docker-compose.yml      # Docker Compose 配置
 ├── .env.example           # 环境变量模板
-└── config/                # 配置文件目录（挂载用）
+└── config/                # 配置示例（运行时不挂载此目录）
     ├── core_config.json.example
     ├── characters.json.example
     └── api_providers.json
@@ -19,7 +19,7 @@ docker/
 
 ### 方式一：环境变量配置（推荐）
 
-所有配置都可以通过环境变量设置。环境变量会覆盖配置文件中的值。
+环境变量用于首次启动时生成持久化初始配置。之后以 `/home/neko/.local/share/N.E.K.O/config` 中的运行时配置为准；只有显式设置 `NEKO_FORCE_ENV_UPDATE` 才会用环境变量重新生成并覆盖该初始配置。
 
 #### 核心 API 配置
 
@@ -55,7 +55,7 @@ docker/
 
 ### 方式二：配置文件（高级用户）
 
-挂载配置文件到容器的 `/app/config` 目录。
+运行时配置位于容器的 `/home/neko/.local/share/N.E.K.O/config`。挂载 `./neko-home:/home/neko` 即可持久化；不要再挂载镜像内的 `/app/config`。
 
 #### core_config.json
 
@@ -96,6 +96,49 @@ docker/
 }
 ```
 
+## 📦 镜像版本选择
+
+N.E.K.O. 镜像发布到两个 registry：
+
+- **GHCR**：`ghcr.io/project-n-e-k-o/n.e.k.o:<tag>` — 所有 tag 都在（含主线 `ci-*` 滚动版）
+- **Docker Hub**：`projectneko/n.e.k.o:<tag>` — **仅 release**（`latest`、`0.8.0-*` 等），避免主线 commit 污染对外 channel
+- **镜像代理**（中国大陆建议优先）：`docker.gh-proxy.org/ghcr.io/project-n-e-k-o/n.e.k.o:<tag>`
+
+### tag 流向一览
+
+| tag | 何时更新 | 发到哪 | 适用场景 |
+|---|---|---|---|
+| `latest` / `latest-full` | 仅在 git tag `v*` push 时移动 | GHCR + Docker Hub | **默认推荐**，跟最新 release |
+| `0.8.0-standard` / `0.8.0-full` | 该 release 打 tag 后定型 | GHCR + Docker Hub | 钉死某个 release，最稳 |
+| `ci-standard` / `ci-full` | 每次 main commit 都会移动 | 仅 GHCR | 跟主线，**内测专用** |
+| `ci-{commit}-standard` / `-full` | 该 main commit 打完后定型 | 仅 GHCR | 复现某个历史 main 版本 |
+| `pr-{N}-ci-standard` / `-full` | （当前 PR 触发已关，仅在 workflow_dispatch 中可手动产） | 仅 GHCR | reviewer 拉下来手验产物 |
+| `pr-ci-standard` / `-full` | 同上，且**任意** PR 触发都会被覆盖 | 仅 GHCR | 不要用，会被随便哪个 PR 顶掉 |
+
+`standard`（~1.5GB）首次启动时下载 Chromium；`full`（~2.5GB）构建时已包含，开箱即用。
+
+> 📦 **GHCR 自动清理**：[docker-cleanup.yml](../.github/workflows/docker-cleanup.yml) 每周清理一次，保留最近 30 个版本 + 上述浮动别名 + 所有 release 版本。`ci-{hash}-*` 和 `pr-{N}-ci-*` 这些一次性 tag 会被陆续回收。
+
+### 推荐拉取方式
+
+```bash
+# 99% 的用户：跟最新 release（standard 版）
+docker pull docker.gh-proxy.org/ghcr.io/project-n-e-k-o/n.e.k.o:latest
+
+# 要预装 Chromium 的 full 版
+docker pull docker.gh-proxy.org/ghcr.io/project-n-e-k-o/n.e.k.o:latest-full
+
+# 钉死某个 release（生产环境推荐）
+docker pull docker.gh-proxy.org/ghcr.io/project-n-e-k-o/n.e.k.o:0.8.0-standard
+
+# 跟主线（开发者 / 内测）
+docker pull docker.gh-proxy.org/ghcr.io/project-n-e-k-o/n.e.k.o:ci-standard
+```
+
+`docker-compose up` 默认就是 `latest`（即最新 release），不会被 main commit 或 PR 影响。要跟主线，在 `.env` 里设 `NEKO_IMAGE_VERSION=ci-standard` 或 `ci-full`。
+
+> ⚠️ **警告**：`ci-*` 和 `pr-*` 是滚动 tag，每次合并 main / 推 PR 都会被覆盖。生产环境一律用 `latest` 或具体的 `{version}-*`。
+
 ## 🚀 快速开始
 
 ### 1. 使用 docker-compose（推荐）
@@ -122,31 +165,31 @@ docker-compose down
 ```bash
 docker run -d \
   --name neko \
-  -p 48911:48911 \
+  -p 48911:80 \
+  -p 48912:443 \
+  -e TZ="Asia/Shanghai" \
   -e NEKO_CORE_API_KEY="your-api-key" \
   -e NEKO_CORE_API="qwen" \
-  -v $(pwd)/config:/app/config \
-  -v $(pwd)/memory:/app/memory \
-  -v $(pwd)/static:/app/static \
+  -e XDG_DATA_HOME="/home/neko/.local/share" \
+  -e NEKO_STORAGE_SELECTED_ROOT="/home/neko/.local/share/N.E.K.O" \
+  -e NEKO_STORAGE_ANCHOR_ROOT="/home/neko/.local/share/N.E.K.O" \
+  -v $(pwd)/neko-home:/home/neko \
+  -v $(pwd)/logs:/app/logs \
   neko:latest
 ```
 
 ## 📂 数据持久化
 
-建议挂载以下目录到宿主机：
+建议将完整的用户主目录挂载到宿主机：
 
-- `/app/config` - 配置文件目录
-- `/app/memory` - 记忆数据目录
-- `/app/static` - Live2D 模型和静态资源
-- `/app/logs` - 日志文件目录
+- `/home/neko` - 配置、记忆、角色、用户插件及插件数据、插件市场 OAuth 登录状态、OpenFang 状态和 TLS 证书/私钥
+- `/app/logs` - 日志
 
 示例：
 
 ```yaml
 volumes:
-  - ./config:/app/config
-  - ./memory:/app/memory
-  - ./static:/app/static
+  - ./neko-home:/home/neko
   - ./logs:/app/logs
 ```
 
@@ -154,8 +197,8 @@ volumes:
 
 配置加载优先级（从高到低）：
 
-1. **环境变量** - `NEKO_*` 开头的环境变量
-2. **挂载的配置文件** - `/app/config/*.json`
+1. **持久化运行时配置** - `/home/neko/.local/share/N.E.K.O/config/*.json`
+2. **初始化输入** - 首次启动时由 Compose / `docker run` 传入的 `NEKO_*` 环境变量生成；设置 `NEKO_FORCE_ENV_UPDATE` 会显式重新生成该配置
 3. **内置默认值** - 代码中定义的默认值
 
 ## 📝 完整配置参考
@@ -163,7 +206,7 @@ volumes:
 查看所有可配置项，请参考：
 
 - **基础配置**: `config/__init__.py` 中的 `DEFAULT_CORE_CONFIG`
-- **运行时配置**: `utils/config_manager.py` 中的 `get_core_config()` 方法
+- **运行时配置**: `utils/config_manager/core_config.py` 中的 `get_core_config()` 方法
 - **API 提供商配置**: `config/api_providers.json`
 
 ### 所有可配置的环境变量
@@ -214,8 +257,8 @@ NEKO_MCP_ROUTER_URL=http://localhost:3283
 # 进入容器
 docker exec -it neko bash
 
-# 检查配置文件
-cat /app/config/core_config.json
+# 检查生效的持久化配置文件
+cat /home/neko/.local/share/N.E.K.O/config/core_config.json
 
 # 检查环境变量
 env | grep NEKO_
@@ -227,10 +270,10 @@ tail -f /app/logs/*.log
 ### 常见问题
 
 **Q: 环境变量不生效？**
-A: 确保环境变量名以 `NEKO_` 开头，并且已在启动时传入。
+A: 环境变量仅用于首次生成初始配置。已有持久化配置时，请在 Web UI 修改配置；不要期待重新启动后由环境变量覆盖。
 
 **Q: 配置文件被覆盖？**
-A: 环境变量优先级高于配置文件。如果想使用配置文件，不要设置对应的环境变量。
+A: 正常重启不会覆盖已有持久化配置。`NEKO_FORCE_ENV_UPDATE` 会用当前环境变量重新生成并覆盖持久化的 `core_config.json`；使用前请先备份，日常修改请通过 Web UI 或明确编辑持久化配置。
 
 **Q: 如何查看所有配置项？**
 A: 运行 `docker exec neko python -c "from utils.config_manager import get_config_manager; import json; print(json.dumps(get_config_manager().get_core_config(), indent=2, ensure_ascii=False))"`
@@ -263,5 +306,4 @@ A: 运行 `docker exec neko python -c "from utils.config_manager import get_conf
 
 - [项目 README](../README.MD)
 - [配置系统说明](../config/__init__.py)
-- [Config Manager 源码](../utils/config_manager.py)
-
+- [Config Manager 源码](../utils/config_manager/)

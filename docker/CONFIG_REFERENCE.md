@@ -11,9 +11,9 @@
    - 模型名称
    - API 提供商配置
    
-2. **`utils/config_manager.py`** - 配置加载和管理逻辑
+2. **`utils/config_manager/`** - 配置加载和管理逻辑（包，原单文件已拆分）
    - `get_core_config()` 方法：合并默认值和用户配置
-   - 第 569-728 行：完整的配置加载流程
+   - `core_config.py` 中的 `get_core_config()`：完整的配置加载流程
 
 3. **`config/api_providers.json`** - API 服务商配置
    - 各个提供商的 URL、模型名称等
@@ -70,17 +70,12 @@
 
 ### 5. 模型配置
 
-#### 直接被导入使用的模型（config/__init__.py 第 26-30 行）
+> 历史上的 `ROUTER_MODEL` / `SEMANTIC_MODEL` / `RERANKER_MODEL` /
+> `SETTING_PROPOSER_MODEL` / `SETTING_VERIFIER_MODEL` 已于 2026-04 全部退环境
+> （见 `config/__init__.py` 顶部说明）。memory 子系统的 LLM 调用统一按 tier
+> 走 `config_manager.get_model_api_config(<tier>)`，嵌入服务走本地 ONNX。
 
-| 配置项 | 代码常量 | 默认值 | 用途 |
-|-------|---------|--------|------|
-| 路由模型 | `ROUTER_MODEL` | `openai/gpt-4.1` | 记忆路由决策 |
-| 设置提议模型 | `SETTING_PROPOSER_MODEL` | `qwen-max` | 设置更新提议 |
-| 设置验证模型 | `SETTING_VERIFIER_MODEL` | `qwen-max` | 设置更新验证 |
-| 语义模型 | `SEMANTIC_MODEL` | `text-embedding-v4` | 语义嵌入 |
-| 重排序模型 | `RERANKER_MODEL` | `qwen-plus` | 搜索结果重排序 |
-
-#### 通过 config_manager 动态获取的模型（config/__init__.py 第 33-36 行）
+#### 通过 config_manager 动态获取的模型
 
 | 配置项 | 代码常量 | 环境变量 | 默认值 | 用途 |
 |-------|---------|---------|--------|------|
@@ -200,7 +195,7 @@ Computer Use 会根据 `assistApi` 自动选择对应提供商的视觉模型：
 ## 📝 配置加载流程
 
 ```python
-# 在 utils/config_manager.py 的 get_core_config() 方法中：
+# 在 utils/config_manager/core_config.py 的 get_core_config() 方法中：
 
 # 1. 从 config/__init__.py 导入默认值
 from config import DEFAULT_CORE_API_KEY, DEFAULT_SUMMARY_MODEL, ...
@@ -288,7 +283,7 @@ print(config)
 - `config/__init__.py` (第 14-69 行) - 端口和模型默认值
 - `config/__init__.py` (第 87-160 行) - API 提供商配置
 - `config/__init__.py` (第 102-112 行) - core_config.json 结构
-- `utils/config_manager.py` (第 569-728 行) - 配置加载逻辑
+- `utils/config_manager/core_config.py` - 配置加载逻辑（get_core_config）
 - `config/api_providers.json` - API 提供商详细配置
 - `main_routers/config_router.py` - 配置读写 API
 

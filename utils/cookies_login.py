@@ -1,16 +1,29 @@
+# Copyright 2025-2026 Project N.E.K.O. Team
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """
-统一 Cookie 登录与凭证管理模块 (安全加固版)
+Unified cookie login and credential management module (security-hardened edition)
 =========================================================
-用于获取并保存各平台的认证 Cookie，包含系统级安全防护。
+Fetches and saves authentication cookies for each platform, with system-level protections.
 
-【核心安全特性】
-1. 凭证脱敏显示：终端输入和日志记录均对核心 Token 进行遮罩处理 (Masking)。
-2. 系统级文件锁：明文 JSON 保存后，自动锁定文件权限 (仅限所有者读写 0o600)。
-3. 凭证有效性校验：保存前强制校验是否包含平台核心字段 (如 SESSDATA, SUB)。
-4. 深度环境伪装：增加完整的 Origin/Referer 请求头，防止触发账号环境风控。
+[Core security features]
+1. Credential masking: core tokens are masked in both terminal input and log records.
+2. System-level file lock: after saving plaintext JSON, file permissions are locked automatically (owner read/write only, 0o600).
+3. Credential validity check: before saving, mandatory check that platform core fields (e.g. SESSDATA, SUB) are present.
+4. Deep environment camouflage: full Origin/Referer request headers to avoid triggering account-environment risk control.
 """
 
-import asyncio
 import json
 import os
 import sys
@@ -31,12 +44,18 @@ if not logger.handlers:
 CONFIG_DIR = Path("config")
 COOKIE_FILES = {
     'netease': CONFIG_DIR / 'netease_cookies.json',
+    'qqmusic': CONFIG_DIR / 'qqmusic_cookies.json',
     'bilibili': CONFIG_DIR / 'bilibili_cookies.json',
+    'xhh': CONFIG_DIR / 'xhh_cookies.json',
     "douyin": CONFIG_DIR / 'douyin_cookies.json',
     "kuaishou": CONFIG_DIR / 'kuaishou_cookies.json', 
     'weibo': CONFIG_DIR / 'weibo_cookies.json',
     'reddit': CONFIG_DIR / 'reddit_cookies.json',
-    'twitter': CONFIG_DIR / 'twitter_cookies.json'
+    'twitter': CONFIG_DIR / 'twitter_cookies.json',
+    'youtube': CONFIG_DIR / 'youtube_cookies.json',
+    # Twitch stores OAuth credentials here, not browser cookies.  Reuse the
+    # existing encrypted, permission-restricted credential store.
+    'twitch': CONFIG_DIR / 'twitch_credentials.json',
 }
 
 class LoginStatus:
@@ -48,7 +67,7 @@ class LoginStatus:
 # 🛡️ 安全模块：脱敏、校验与文件锁
 # ==========================================
 def mask_string(s: str) -> str:
-    """对敏感凭证进行打码处理，防止屏幕偷窥或日志泄露"""
+    """Mask sensitive credentials to prevent shoulder-surfing or log leaks"""
     if not s:
         return ""
     if len(s) < 8:
@@ -56,10 +75,25 @@ def mask_string(s: str) -> str:
     return f"{s[:4]}...{s[-4:]}"
 
 def validate_cookies(platform: str, cookies: Dict[str, str]) -> bool:
-    """核心凭证防伪校验，防止残缺 Cookie 导致账号异常或风控"""
+    """Core credential integrity check, preventing incomplete cookies from causing account anomalies or risk control"""
+    if platform == 'youtube':
+        if not cookies.get('SAPISID'):
+            logger.warning("⚠️ 安全拦截：YouTube Cookie 缺少 SAPISID！")
+            return False
+        return True
+
+    if platform == 'twitch':
+        required = ('access_token', 'refresh_token', 'client_id')
+        if not all(cookies.get(key) for key in required):
+            logger.warning("⚠️ 安全拦截：Twitch OAuth 凭证缺少必要字段！")
+            return False
+        return True
+
     required_keys = {
         'netease': ['MUSIC_U'],
+        'qqmusic': ['uin', 'qqmusic_key'],
         'bilibili': ['SESSDATA'],
+        'xhh': ['user_heybox_id', 'user_pkey'],
         "douyin": ['sessionid', 'ttwid'],
         "kuaishou": ['kuaishou.server.web_st', 'userId'], 
         'weibo': ['SUB'],
@@ -74,8 +108,23 @@ def validate_cookies(platform: str, cookies: Dict[str, str]) -> bool:
                 return False
     return True
 
+
+def get_cookie_key_file(platform: str) -> Path:
+    return CONFIG_DIR / f"{platform}_key.key"
+
+
+def _read_encryption_key(platform: str, key_file: Path) -> bytes:
+    return key_file.read_bytes()
+
+
+def _write_encryption_key(platform: str, key_file: Path, key: bytes) -> None:
+    key_file.write_bytes(key)
+
+    if sys.platform != 'win32':
+        os.chmod(key_file, 0o600)
+
 def save_cookies_to_file(platform: str, cookies: Dict[str, Any], encrypt: bool = True) -> bool:
-    """保存Cookie，包含规范化校验与加密逻辑"""
+    """Save cookies, with normalization checks and encryption logic"""
     try:
         if platform not in COOKIE_FILES:
             return False
@@ -100,17 +149,12 @@ def save_cookies_to_file(platform: str, cookies: Dict[str, Any], encrypt: bool =
             from cryptography.fernet import Fernet
             
             # 生成或加载加密密钥
-            key_file = CONFIG_DIR / f"{platform}_key.key"
+            key_file = get_cookie_key_file(platform)
             if key_file.exists():
-                with open(key_file, 'rb') as f:
-                    key = f.read()
+                key = _read_encryption_key(platform, key_file)
             else:
                 key = Fernet.generate_key()
-                with open(key_file, 'wb') as f:
-                    f.write(key)
-                # 设置密钥文件权限
-                if sys.platform != 'win32':
-                    os.chmod(key_file, 0o600)
+                _write_encryption_key(platform, key_file, key)
             
             # 加密Cookie数据
             fernet = Fernet(key)
@@ -136,9 +180,12 @@ def save_cookies_to_file(platform: str, cookies: Dict[str, Any], encrypt: bool =
             
             logger.info(f"✅ 已明文保存 {platform} 凭证到: {cookie_file}")
         
-        logger.info(f"🔐 【{platform.capitalize()} 凭证摘要】:")
-        for k, v in list(cookies.items())[:3]: # 仅展示前三个键
-            logger.info(f"   - {k}: {mask_string(v)}")
+        # OAuth bearer material must never enter logs, even in partially masked
+        # form. Cookie-based platforms retain the existing diagnostic summary.
+        if platform != 'twitch':
+            logger.info(f"🔐 【{platform.capitalize()} 凭证摘要】:")
+            for k, v in list(cookies.items())[:3]: # 仅展示前三个键
+                logger.info(f"   - {k}: {mask_string(v)}")
         return True
         
     except Exception as e:
@@ -147,9 +194,9 @@ def save_cookies_to_file(platform: str, cookies: Dict[str, Any], encrypt: bool =
 
 def _normalize_cookies(cookies: Dict[str, Any], platform: str) -> Dict[str, str]:
     """
-    规范化 Cookie 结构：
-    - 强制要求键和值必须全部为字符串类型
-    - 杜绝 int/bool/None 等非字符串值被意外转换为非空字符串（如 "False"）
+    Normalize the cookie structure:
+    - Require all keys and values to be strings
+    - Prevent int/bool/None and other non-string values from being accidentally converted to non-empty strings (e.g. "False")
     """
     valid_cookies: Dict[str, str] = {}
     
@@ -171,7 +218,7 @@ def _normalize_cookies(cookies: Dict[str, Any], platform: str) -> Dict[str, str]
     return valid_cookies
 
 def load_cookies_from_file(platform: str) -> Dict[str, str]:
-    """从文件加载Cookie，自动检测是否加密"""
+    """Load cookies from file, auto-detecting whether they are encrypted"""
     try:
         if platform not in COOKIE_FILES:
             return {}
@@ -185,10 +232,9 @@ def load_cookies_from_file(platform: str) -> Dict[str, str]:
             from cryptography.fernet import Fernet
             
             # 加载加密密钥
-            key_file = CONFIG_DIR / f"{platform}_key.key"
+            key_file = get_cookie_key_file(platform)
             if key_file.exists():
-                with open(key_file, 'rb') as f:
-                    key = f.read()
+                key = _read_encryption_key(platform, key_file)
                 
                 # 解密Cookie数据
                 with open(cookie_file, 'rb') as f:
@@ -256,7 +302,7 @@ def load_cookies_from_file(platform: str) -> Dict[str, str]:
         return {}
 
 def parse_cookie_string(cookie_string: str) -> Dict[str, str]:
-    """解析纯文本 Cookie"""
+    """Parse plaintext cookies"""
     cookies = {}
     if not cookie_string:
         return cookies
@@ -268,77 +314,109 @@ def parse_cookie_string(cookie_string: str) -> Dict[str, str]:
 
  
 
-async def get_bilibili_cookies(_method: str = "manual") -> Optional[Dict[str, str]]:
+def get_bilibili_cookies(_method: str = "manual") -> Optional[Dict[str, str]]:
     print("\n" + "-" * 40)
     print("【B站手动导入】(注意：请勿在此界面外泄露您的 SESSDATA)")
     cookie_string = input("👉 请粘贴 Cookie: ").strip()
     print("\033[F\033[K" + "👉 请粘贴 Cookie: [已接收，已脱敏掩码]") 
     cookies = parse_cookie_string(cookie_string)
     if cookies:
-        save_cookies_to_file('bilibili', cookies)
+        save_cookies_to_file('bilibili', cookies)  # noqa: ASYNC_BLOCK — CLI-only path; outer fn already blocks on input()
+    return cookies
+
+
+def get_xhh_cookies(_method: str = "manual") -> Optional[Dict[str, str]]:
+    print("\n" + "-" * 40)
+    print("【小黑盒手动导入】(需包含 user_heybox_id 和 user_pkey 字段)")
+    cookie_string = input("👉 请粘贴 Cookie: ").strip()
+    print("\033[F\033[K" + "👉 请粘贴 Cookie: [已接收，已脱敏掩码]")
+    cookies = parse_cookie_string(cookie_string)
+    if cookies:
+        save_cookies_to_file('xhh', cookies)
     return cookies
 
 # ==========================================
 # 其他平台登录逻辑 (纯手工导入)
 # ==========================================
-async def get_douyin_cookies(_method: str = "manual") -> Optional[Dict[str, str]]:
+def get_douyin_cookies(_method: str = "manual") -> Optional[Dict[str, str]]:
     print("\n" + "-" * 40)
     print("【抖音手动导入】(需包含 sessionid 和 ttwid 字段)")
     cookie_string = input("👉 请粘贴 Cookie: ").strip()
     print("\033[F\033[K" + "👉 请粘贴 Cookie: [已接收，已脱敏掩码]")
     cookies = parse_cookie_string(cookie_string)
     if cookies:
-        save_cookies_to_file('douyin', cookies)
+        save_cookies_to_file('douyin', cookies)  # noqa: ASYNC_BLOCK — CLI-only path; outer fn already blocks on input()
     return cookies
 
-async def get_kuaishou_cookies(_method: str = "manual") -> Optional[Dict[str, str]]:
+def get_kuaishou_cookies(_method: str = "manual") -> Optional[Dict[str, str]]:
     print("\n" + "-" * 40)
     print("【快手手动导入】(需包含 kuaishou.server.web_st 字段)")
     cookie_string = input("👉 请粘贴 Cookie: ").strip()
     print("\033[F\033[K" + "👉 请粘贴 Cookie: [已接收，已脱敏掩码]")
     cookies = parse_cookie_string(cookie_string)
     if cookies:
-        save_cookies_to_file('kuaishou', cookies)
+        save_cookies_to_file('kuaishou', cookies)  # noqa: ASYNC_BLOCK — CLI-only path; outer fn already blocks on input()
     return cookies
 
-async def get_weibo_cookies(_method: str = "manual") -> Optional[Dict[str, str]]:
+def get_weibo_cookies(_method: str = "manual") -> Optional[Dict[str, str]]:
     print("\n" + "-" * 40)
     print("【微博手动导入】(需包含 SUB 字段)")
     cookie_string = input("👉 请粘贴 Cookie: ").strip()
     print("\033[F\033[K" + "👉 请粘贴 Cookie: [已接收，已脱敏掩码]")
     cookies = parse_cookie_string(cookie_string)
     if cookies:
-        save_cookies_to_file('weibo', cookies)
+        save_cookies_to_file('weibo', cookies)  # noqa: ASYNC_BLOCK — CLI-only path; outer fn already blocks on input()
     return cookies
 
-async def get_reddit_cookies(_method: str = "manual") -> Optional[Dict[str, str]]:
+def get_reddit_cookies(_method: str = "manual") -> Optional[Dict[str, str]]:
     print("\n" + "-" * 40)
     print("【Reddit 手动导入】")
     cookie_string = input("👉 请粘贴 Cookie: ").strip()
     print("\033[F\033[K" + "👉 请粘贴 Cookie: [已接收，已脱敏掩码]")
     cookies = parse_cookie_string(cookie_string)
     if cookies:
-        save_cookies_to_file('reddit', cookies)
+        save_cookies_to_file('reddit', cookies)  # noqa: ASYNC_BLOCK — CLI-only path; outer fn already blocks on input()
     return cookies
 
-async def get_twitter_cookies(_method: str = "manual") -> Optional[Dict[str, str]]:
+def get_twitter_cookies(_method: str = "manual") -> Optional[Dict[str, str]]:
     print("\n" + "-" * 40)
     print("【Twitter/X 手动导入】")
     cookie_string = input("👉 请粘贴 Cookie: ").strip()
     print("\033[F\033[K" + "👉 请粘贴 Cookie: [已接收，已脱敏掩码]")
     cookies = parse_cookie_string(cookie_string)
     if cookies:
-        save_cookies_to_file('twitter', cookies)
+        save_cookies_to_file('twitter', cookies)  # noqa: ASYNC_BLOCK — CLI-only path; outer fn already blocks on input()
     return cookies
 
-async def get_netease_cookies(_method: str = "manual") -> Optional[Dict[str, str]]:
+def get_youtube_cookies(_method: str = "manual") -> Optional[Dict[str, str]]:
+    print("\n" + "-" * 40)
+    print("【YouTube 手动导入】(必须包含 SAPISID 字段)")
+    cookie_string = input("👉 请粘贴 Cookie: ").strip()
+    print("\033[F\033[K" + "👉 请粘贴 Cookie: [已接收，已脱敏掩码]")
+    cookies = parse_cookie_string(cookie_string)
+    if cookies:
+        save_cookies_to_file('youtube', cookies)
+    return cookies
+
+def get_netease_cookies(_method: str = "manual") -> Optional[Dict[str, str]]:
     print("\n" + "-" * 40)
     print("【网易云音乐手动导入】(需包含 MUSIC_U 字段)")
     cookie_string = input("👉 请粘贴 Cookie: ").strip()
     print("\033[F\033[K" + "👉 请粘贴 Cookie: [已接收，已脱敏掩码]")
     cookies = parse_cookie_string(cookie_string)
     if cookies:
-        save_cookies_to_file('netease', cookies)
+        save_cookies_to_file('netease', cookies)  # noqa: ASYNC_BLOCK — CLI-only path; outer fn already blocks on input()
+    return cookies
+
+
+def get_qqmusic_cookies(_method: str = "manual") -> Optional[Dict[str, str]]:
+    print("\n" + "-" * 40)
+    print("【QQ音乐手动导入】(需包含 uin 和 qqmusic_key 字段)")
+    cookie_string = input("👉 请粘贴 Cookie: ").strip()
+    print("\033[F\033[K" + "👉 请粘贴 Cookie: [已接收，已脱敏掩码]")
+    cookies = parse_cookie_string(cookie_string)
+    if cookies:
+        save_cookies_to_file('qqmusic', cookies)  # noqa: ASYNC_BLOCK — CLI-only path; outer fn already blocks on input()
     return cookies
 
 # ==========================================
@@ -348,21 +426,39 @@ class PlatformLoginManager:
     def __init__(self):
         self.platforms = {
             'netease': {'name': '网易云音乐', 'methods': ['manual'], 'func': get_netease_cookies},
+            'qqmusic': {'name': 'QQ音乐', 'methods': ['manual'], 'func': get_qqmusic_cookies},
             'bilibili': {'name': 'Bilibili', 'methods': ['manual'], 'func': get_bilibili_cookies},
+            'xhh': {'name': '小黑盒', 'methods': ['manual'], 'func': get_xhh_cookies},
             "douyin": {'name': '抖音', 'methods': ['manual'], 'func': get_douyin_cookies},
             "kuaishou": {'name': '快手', 'methods': ['manual'], 'func': get_kuaishou_cookies},
             'weibo': {'name': '微博', 'methods': ['manual'], 'func': get_weibo_cookies},
             'reddit': {'name': 'Reddit', 'methods': ['manual'], 'func': get_reddit_cookies},
-            'twitter': {'name': 'Twitter/X', 'methods': ['manual'], 'func': get_twitter_cookies}
+            'twitter': {'name': 'Twitter/X', 'methods': ['manual'], 'func': get_twitter_cookies},
+            'youtube': {'name': 'YouTube', 'methods': ['manual'], 'func': get_youtube_cookies},
+            'twitch': {'name': 'Twitch', 'methods': ['device_code'], 'func': lambda _method: None},
         }
     
-    async def login_platform(self, platform: str, method: str) -> Optional[Dict[str, str]]:
+    def login_platform(self, platform: str, method: str) -> Optional[Dict[str, str]]:
         if platform in self.platforms:
-            return await self.platforms[platform]['func'](method)
+            return self.platforms[platform]['func'](method)
         return None
+
+    def build_request_params(
+        self,
+        platform: str,
+        path: str,
+        *,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Build platform-specific request parameters through one login entry point."""
+        if platform == 'xhh':
+            from utils.web_scraper.platform_helpers import build_xhh_request_params
+
+            return build_xhh_request_params(path, extra=extra)
+        return dict(extra or {})
     
     def get_supported_platforms(self) -> Dict[str, Dict[str, Any]]:
-        """获取支持的平台及其登录方式"""
+        """Get supported platforms and their login methods"""
         result = {}
         for platform, info in self.platforms.items():
             result[platform] = {
@@ -375,7 +471,7 @@ class PlatformLoginManager:
                 result[platform]['default_method'] = None
         return result
 
-async def interactive_login():
+def interactive_login():
     manager = PlatformLoginManager()
     platforms = list(manager.platforms.items())
     
@@ -414,7 +510,7 @@ async def interactive_login():
                         pass
                 
                 print(f"\n🚀 正在启动 {p_info['name']} 的 {method} 安全流程...")
-                await manager.login_platform(p_key, method)
+                manager.login_platform(p_key, method)
             else:
                 print("❌ 无效的序号。")
         except ValueError:
@@ -425,9 +521,7 @@ async def interactive_login():
 
 if __name__ == "__main__":
     try:
-        if sys.platform == 'win32':
-            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-        asyncio.run(interactive_login())
+        interactive_login()
     except KeyboardInterrupt:
         print("\n👋 终端已安全关闭。")
         sys.exit(0)

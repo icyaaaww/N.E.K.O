@@ -1,3 +1,17 @@
+# Copyright 2025-2026 Project N.E.K.O. Team
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Public holiday cache & greeting consumption tracker.
 
 Fetches yearly holiday data from https://date.nager.at/api/v3 at startup,
@@ -7,17 +21,17 @@ with a per-period consumption budget.  Consumption state is persisted to disk.
 Key concepts
 ------------
 - **HolidayPeriod**: consecutive rest days grouped into one period, containing
-  both 法定假日 (statutory holidays) and 调休 (adjusted rest days).
+  both statutory holidays and adjusted rest days (tiaoxiu).
 - **CN supplement**: patches the Nager API with correct statutory day counts
-  and approximate 调休 extensions.
+  and approximate adjusted-rest-day extensions.
 
 Consumption rules (per character, per period)
 ---------------------------------------------
-- 假日当天 (any statutory holiday day within the period) : budget 3 (shared)
-- 假期非假日 (调休 rest days within the period)           : budget 3 (shared)
-- Single-day holiday (no 调休)                           : total 3
-- Multi-day holiday (with 调休)                          : total 6  (3+3)
-- Weekend (no holiday)                                   : budget 2 per day
+- Holiday day proper (any statutory holiday day within the period) : budget 3 (shared)
+- Non-holiday rest day (adjusted rest days within the period)      : budget 3 (shared)
+- Single-day holiday (no adjusted rest days)                       : total 3
+- Multi-day holiday (with adjusted rest days)                      : total 6  (3+3)
+- Weekend (no holiday)                                             : budget 2 per day
 - When budget is exhausted, the hint is omitted entirely.
 """
 
@@ -26,22 +40,41 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TypedDict
 
 import httpx
 
+from config.prompts.prompts_proactive import (
+    HOLIDAY_HINT_TODAY,
+    HOLIDAY_HINT_SOON,
+    HOLIDAY_HINT_WEEK,
+    WEEKEND_HINT,
+)
+
 logger = logging.getLogger(__name__)
 
 # ── language → country code mapping ──────────────────────────────────
 _LANG_TO_COUNTRY: dict[str, str] = {
     'zh': 'CN',
+    'zh-CN': 'CN',
+    'zh-TW': 'TW',
     'en': 'US',
     'ja': 'JP',
     'ko': 'KR',
     'ru': 'RU',
 }
+
+
+def _holiday_hint_language_key(lang: str, table: dict[str, str]) -> str:
+    """Select a template locale while keeping Chinese-family fallback."""
+    if lang in table:
+        return lang
+    if str(lang).lower().startswith('zh') and 'zh' in table:
+        return 'zh'
+    return 'en'
 
 # ── types ────────────────────────────────────────────────────────────
 
@@ -56,9 +89,10 @@ class HolidayPeriod:
 
     Attributes:
         start / end      — inclusive boundaries of the full rest period
-        nominal_date     — the single "名义日期" of the holiday (e.g. 10/1 for
-                           国庆节, 初一 for 春节).  Only THIS day qualifies as
-                           "假日当天" with an independent 3-use budget.
+        nominal_date     — the single "nominal date" of the holiday (e.g. 10/1 for
+                           National Day, Lunar New Year's Day for Spring Festival).
+                           Only THIS day qualifies as the "holiday day proper" with
+                           an independent 3-use budget.
         name / local_name — display names
     """
     __slots__ = ("name", "local_name", "start", "end", "nominal_date")
@@ -84,7 +118,7 @@ class HolidayPeriod:
         return self.start <= d <= self.end
 
     def is_nominal_day(self, d: date) -> bool:
-        """Is *d* the holiday's nominal date (假日当天)?"""
+        """Is *d* the holiday's nominal date (the holiday day proper)?"""
         return d == (self.nominal_date or self.start)
 
     def __repr__(self) -> str:
@@ -104,13 +138,18 @@ _FETCH_TIMEOUT = 10.0
 
 # ── 全局补充节日（所有国家共享，固定日期，API 可能不含） ──────────
 # 格式: (month, day, localName_dict)
+# Holiday display names below are *data*, not LLM prompts — they're returned
+# as HolidayEntry.localName for display. The dict-shape happens to match the
+# i18n-leak detector but the project convention exempts pure localized data.
 _GLOBAL_EXTRA_HOLIDAYS: list[tuple[int, int, dict[str, str]]] = [
-    (2, 14, {
-        'zh': '情人节', 'en': "Valentine's Day", 'ja': 'バレンタインデー',
+    (2, 14, {  # noqa: I18N_NOT_IN_CONFIG  # holiday display data, not LLM prompt
+        'zh': '情人节', 'zh-TW': '情人節',
+        'en': "Valentine's Day", 'ja': 'バレンタインデー',
         'ko': '발렌타인데이', 'ru': 'День святого Валентина',
     }),
-    (12, 25, {
-        'zh': '圣诞节', 'en': 'Christmas', 'ja': 'クリスマス',
+    (12, 25, {  # noqa: I18N_NOT_IN_CONFIG  # holiday display data, not LLM prompt
+        'zh': '圣诞节', 'zh-TW': '聖誕節',
+        'en': 'Christmas', 'ja': 'クリスマス',
         'ko': '크리스마스', 'ru': 'Рождество',
     }),
 ]
@@ -205,6 +244,8 @@ def _build_periods(entries: list[HolidayEntry]) -> list[HolidayPeriod]:
 async def _fetch_nager(country: str, year: int) -> list[HolidayEntry]:
     """Fetch from Nager.Date API (JP / KR / RU / US etc.)."""
     url = f"{_NAGER_API}/PublicHolidays/{year}/{country}"
+    # per-call AsyncClient: 每年每国家只拉一次（lazy warmup），且刻意 trust_env=False
+    # 绕开本地代理 —— 与 external_http_client（trust_env=True）配置不一致
     async with httpx.AsyncClient(timeout=_FETCH_TIMEOUT, proxy=None, trust_env=False) as client:
         resp = await client.get(url)
         resp.raise_for_status()
@@ -212,8 +253,9 @@ async def _fetch_nager(country: str, year: int) -> list[HolidayEntry]:
 
 
 async def _fetch_cn(year: int) -> list[HolidayEntry]:
-    """Fetch from timor.tech API for China — complete with 调休."""
+    """Fetch from timor.tech API for China — complete with adjusted rest days."""
     url = f"{_TIMOR_API}/{year}"
+    # per-call AsyncClient: 同上，每年一次，trust_env=False 绕开代理
     async with httpx.AsyncClient(timeout=_FETCH_TIMEOUT, proxy=None, trust_env=False) as client:
         resp = await client.get(url)
         resp.raise_for_status()
@@ -290,7 +332,13 @@ async def _warm_all_once() -> None:
         except Exception as e:
             logger.info("Holiday cache fetch skipped for %s/%d: %s", country, year, e)
 
-    await asyncio.gather(*[_fetch_one(l, c) for l, c in _LANG_TO_COUNTRY.items()])
+    country_locales: dict[str, str] = {}
+    for lang, country in _LANG_TO_COUNTRY.items():
+        country_locales.setdefault(country, lang)
+    await asyncio.gather(*[
+        _fetch_one(lang, country)
+        for country, lang in country_locales.items()
+    ])
 
 
 async def _ensure_periods(country: str, year: int) -> list[HolidayPeriod]:
@@ -339,7 +387,7 @@ async def get_nearest_holiday(lang: str) -> HolidayProximity | None:
     - "Today" matches if today falls *anywhere* inside a period.
     - Advance reminders (≤3 / 7 days) are based on the period's *start*.
     - In late December, also checks next year's periods so that early-
-      January holidays (e.g. 元旦) are not missed near year boundaries.
+      January holidays (e.g. New Year's Day) are not missed near year boundaries.
     """
     country = _LANG_TO_COUNTRY.get(lang)
     if not country:
@@ -394,6 +442,11 @@ async def get_nearest_holiday(lang: str) -> HolidayProximity | None:
 _CONSUMPTION_FILENAME = "holiday_consumption.json"
 _consumption_data: dict[str, dict] = {}
 _consumption_path: Path | None = None
+# Protects RMW on _consumption_data + atomic_write_json; covers both the
+# immediate-consume (get_holiday_or_weekend_hint) and deferred-commit
+# (commit_holiday_or_weekend_hint via asyncio.to_thread) paths against
+# concurrent writers in worker threads.
+_consumption_lock = threading.Lock()
 
 _BUDGET_HOLIDAY = 3   # statutory day budget (shared across all 假日 days)
 _BUDGET_PERIOD = 3    # 调休 day budget (shared across all 调休 days)
@@ -459,31 +512,32 @@ def _get_period_bucket(character: str, period: HolidayPeriod,
 def _consume_period_bucket(character: str, period: HolidayPeriod,
                            bucket: str, budget: int) -> bool:
     """Try to consume 1 use from a period bucket. Returns True if successful."""
-    rec = _get_char_record(character)
-    period_key = period.start.isoformat()
-    if period_key not in rec["periods"]:
-        rec["periods"][period_key] = {}
-    period_rec = rec["periods"][period_key]
+    with _consumption_lock:
+        rec = _get_char_record(character)
+        period_key = period.start.isoformat()
+        if period_key not in rec["periods"]:
+            rec["periods"][period_key] = {}
+        period_rec = rec["periods"][period_key]
 
-    remaining = period_rec.get(bucket)
-    if remaining is None:
-        # First use → initialise
-        period_rec[bucket] = budget - 1
-        _save_consumption()
-        return True
-    if remaining > 0:
-        period_rec[bucket] = remaining - 1
-        _save_consumption()
-        return True
-    return False
+        remaining = period_rec.get(bucket)
+        if remaining is None:
+            # First use → initialise
+            period_rec[bucket] = budget - 1
+            _save_consumption()
+            return True
+        if remaining > 0:
+            period_rec[bucket] = remaining - 1
+            _save_consumption()
+            return True
+        return False
 
 
 def try_consume_holiday(character: str, proximity: HolidayProximity) -> bool:
     """Try to consume 1 hint use for a holiday.
 
     Budget logic:
-    - 假日当天 (nominal date, e.g. 10/1) → "holiday" bucket (3, independent)
-    - 假期中非假日当天 (all other days in period) → "period" bucket (3, shared)
+    - Holiday day proper (nominal date, e.g. 10/1) → "holiday" bucket (3, independent)
+    - Non-holiday days within the period (all other days) → "period" bucket (3, shared)
     - Advance reminder (≤3 / 7 days) → "period" bucket (3)
     """
     period = proximity.period
@@ -500,22 +554,23 @@ def try_consume_holiday(character: str, proximity: HolidayProximity) -> bool:
 
 def try_consume_weekend(character: str) -> bool:
     """Try to consume 1 use for a weekend hint. Budget 2, resets daily."""
-    rec = _get_char_record(character)
-    today_iso = date.today().isoformat()
+    with _consumption_lock:
+        rec = _get_char_record(character)
+        today_iso = date.today().isoformat()
 
-    if rec.get("weekend_date") != today_iso:
-        # New day → reset
-        rec["weekend_date"] = today_iso
-        rec["weekend"] = _BUDGET_WEEKEND - 1
-        _save_consumption()
-        return True
+        if rec.get("weekend_date") != today_iso:
+            # New day → reset
+            rec["weekend_date"] = today_iso
+            rec["weekend"] = _BUDGET_WEEKEND - 1
+            _save_consumption()
+            return True
 
-    remaining = rec.get("weekend", 0)
-    if remaining > 0:
-        rec["weekend"] = remaining - 1
-        _save_consumption()
-        return True
-    return False
+        remaining = rec.get("weekend", 0)
+        if remaining > 0:
+            rec["weekend"] = remaining - 1
+            _save_consumption()
+            return True
+        return False
 
 
 # Startup: load persisted data
@@ -529,37 +584,8 @@ except Exception:
 #  High-level hint builder
 # =====================================================================
 
-_HOLIDAY_HINT_TODAY: dict[str, str] = {
-    'zh': '今天是{name}！这是一个特别的日子。',
-    'en': 'Today is {name}! It is a special day.',
-    'ja': '今日は{name}だ！特別な日だね。',
-    'ko': '오늘은 {name}이다! 특별한 날이야.',
-    'ru': 'Сегодня {name}! Это особенный день.',
-}
-
-_HOLIDAY_HINT_SOON: dict[str, str] = {
-    'zh': '再过{days}天就是{name}假期了，可以期待一下。',
-    'en': 'The {name} holiday is coming in {days} days — something to look forward to.',
-    'ja': 'あと{days}日で{name}の休日だ。楽しみだね。',
-    'ko': '{days}일 후면 {name} 연휴다. 기대되네.',
-    'ru': 'Через {days} дней начнутся праздники {name} — есть чего ждать.',
-}
-
-_HOLIDAY_HINT_WEEK: dict[str, str] = {
-    'zh': '这周就是{name}假期了哦。',
-    'en': 'The {name} holiday is coming up this week.',
-    'ja': '今週は{name}の休日がやってくるよ。',
-    'ko': '이번 주에 {name} 연휴가 다가오고 있어.',
-    'ru': 'На этой неделе начнутся праздники {name}.',
-}
-
-_WEEKEND_HINT: dict[str, str] = {
-    'zh': '今天是周末，好好放松吧。',
-    'en': 'It is the weekend — time to relax.',
-    'ja': '今日は週末だ。ゆっくり過ごしてね。',
-    'ko': '오늘은 주말이다. 푹 쉬어.',
-    'ru': 'Сегодня выходной — время отдохнуть.',
-}
+# Templates HOLIDAY_HINT_{TODAY,SOON,WEEK} and WEEKEND_HINT are imported
+# from config.prompts.prompts_proactive — see top of file.
 
 
 async def get_holiday_or_weekend_hint(lang: str, character: str) -> str | None:
@@ -567,6 +593,10 @@ async def get_holiday_or_weekend_hint(lang: str, character: str) -> str | None:
 
     Returns ``None`` if budget exhausted or no event — caller should
     produce **no** placeholder text.
+
+    This is a convenience wrapper that **immediately** consumes the budget.
+    For deferred consumption (e.g. greeting with abort checkpoints), use
+    :func:`preview_holiday_or_weekend_hint` + :func:`commit_holiday_or_weekend_hint`.
     """
     proximity = await get_nearest_holiday(lang)
 
@@ -575,25 +605,117 @@ async def get_holiday_or_weekend_hint(lang: str, character: str) -> str | None:
             return None
 
         name = proximity.period.display_name
-        lang_key = lang if lang in _HOLIDAY_HINT_TODAY else 'en'
+        lang_key = _holiday_hint_language_key(lang, HOLIDAY_HINT_TODAY)
 
         if proximity.is_today:
-            tpl = _HOLIDAY_HINT_TODAY.get(lang_key, _HOLIDAY_HINT_TODAY['en'])
+            tpl = HOLIDAY_HINT_TODAY.get(lang_key, HOLIDAY_HINT_TODAY['en'])
             return tpl.format(name=name)
         elif proximity.days_away <= 3:
-            tpl = _HOLIDAY_HINT_SOON.get(lang_key, _HOLIDAY_HINT_SOON['en'])
+            tpl = HOLIDAY_HINT_SOON.get(lang_key, HOLIDAY_HINT_SOON['en'])
             return tpl.format(name=name, days=proximity.days_away)
         else:
-            tpl = _HOLIDAY_HINT_WEEK.get(lang_key, _HOLIDAY_HINT_WEEK['en'])
+            tpl = HOLIDAY_HINT_WEEK.get(lang_key, HOLIDAY_HINT_WEEK['en'])
             return tpl.format(name=name)
 
     # No holiday → check weekend
     if datetime.now().weekday() >= 5:
         if not try_consume_weekend(character):
             return None
-        return _WEEKEND_HINT.get(lang, _WEEKEND_HINT.get('en', ''))
+        lang_key = _holiday_hint_language_key(lang, WEEKEND_HINT)
+        return WEEKEND_HINT.get(lang_key, WEEKEND_HINT.get('en', ''))
 
     return None
+
+
+# ── preview / commit (deferred consumption) ────────────────────────
+
+def _has_holiday_budget(character: str, proximity: HolidayProximity) -> bool:
+    """Check whether budget is available WITHOUT consuming or mutating state."""
+    rec = _consumption_data.get(character)
+    if rec is None:
+        return True  # no record → full budget
+    period_key = proximity.period.start.isoformat()
+    period_rec = rec.get("periods", {}).get(period_key)
+    if period_rec is None:
+        return True  # not initialised → full budget
+
+    if not proximity.is_today:
+        return period_rec.get("period", _BUDGET_PERIOD) > 0
+    if proximity.period.is_nominal_day(date.today()):
+        return period_rec.get("holiday", _BUDGET_HOLIDAY) > 0
+    return period_rec.get("period", _BUDGET_PERIOD) > 0
+
+
+def _has_weekend_budget(character: str) -> bool:
+    """Check whether weekend budget is available WITHOUT consuming or mutating state."""
+    rec = _consumption_data.get(character)
+    if rec is None:
+        return True  # no record → full budget
+    today_iso = date.today().isoformat()
+    if rec.get("weekend_date") != today_iso:
+        return True  # new day → full budget
+    return rec.get("weekend", 0) > 0
+
+
+def _build_holiday_hint_text(lang: str, proximity: HolidayProximity) -> str:
+    """Build hint text from a proximity object (no side effects)."""
+    name = proximity.period.display_name
+    lang_key = _holiday_hint_language_key(lang, HOLIDAY_HINT_TODAY)
+    if proximity.is_today:
+        tpl = HOLIDAY_HINT_TODAY.get(lang_key, HOLIDAY_HINT_TODAY['en'])
+        return tpl.format(name=name)
+    elif proximity.days_away <= 3:
+        tpl = HOLIDAY_HINT_SOON.get(lang_key, HOLIDAY_HINT_SOON['en'])
+        return tpl.format(name=name, days=proximity.days_away)
+    else:
+        tpl = HOLIDAY_HINT_WEEK.get(lang_key, HOLIDAY_HINT_WEEK['en'])
+        return tpl.format(name=name)
+
+
+# Token: ("holiday", HolidayProximity) | ("weekend",)
+
+async def preview_holiday_or_weekend_hint(
+    lang: str, character: str,
+) -> tuple[str | None, tuple | None]:
+    """Get hint text WITHOUT consuming budget.
+
+    Returns ``(hint_text, token)``.  Pass *token* to
+    :func:`commit_holiday_or_weekend_hint` after successful delivery.
+    ``(None, None)`` when no event or budget exhausted.
+    """
+    proximity = await get_nearest_holiday(lang)
+
+    if proximity is not None:
+        if not _has_holiday_budget(character, proximity):
+            return None, None
+        return _build_holiday_hint_text(lang, proximity), ("holiday", proximity)
+
+    # No holiday → check weekend
+    if datetime.now().weekday() >= 5:
+        if not _has_weekend_budget(character):
+            return None, None
+        lang_key = _holiday_hint_language_key(lang, WEEKEND_HINT)
+        text = WEEKEND_HINT.get(lang_key, WEEKEND_HINT.get('en', ''))
+        return text, ("weekend",)
+
+    return None, None
+
+
+def commit_holiday_or_weekend_hint(character: str, token: tuple) -> bool:
+    """Consume budget for a previously previewed hint.
+
+    Returns ``True`` if the budget was successfully decremented.
+    Should be called only once per preview, after the hint was actually
+    delivered to the user.
+    """
+    if not token:
+        return False
+    kind = token[0]
+    if kind == "holiday":
+        return try_consume_holiday(character, token[1])
+    if kind == "weekend":
+        return try_consume_weekend(character)
+    return False
 
 
 # =====================================================================

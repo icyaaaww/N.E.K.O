@@ -12,7 +12,7 @@
  * 1. 加载本地 i18next 库（从 /static/libs/）
  * 2. 检查依赖加载状态
  * 3. 处理加载失败容错（重新加载或降级方案）
- * 4. 从 Steam API 获取语言设置
+ * 4. 从配置覆盖 / Steam API 获取语言设置
  * 5. 初始化 i18next
  */
 
@@ -26,16 +26,315 @@
     window.i18nInitialized = true;
 
     // 支持的语言列表
-    const SUPPORTED_LANGUAGES = ['zh-CN', 'zh-TW', 'en', 'ja', 'ko', 'ru'];
+    const SUPPORTED_LANGUAGES = ['zh-CN', 'zh-TW', 'en', 'ja', 'ko', 'ru', 'es', 'pt'];
 
     // locale 资源版本（用于 cache-busting，避免客户端长期缓存旧语言包导致新增 key 不生效）
-    // 更新语言包内容时可以递增此值
-    const LOCALE_VERSION = '2026-03-16-1';
+    // 修改原因：角色语言偏好新增「被更新的偏好取代」提示文案；递增版本让
+    // Electron、Docker 等长期缓存重新拉取包含完整新 key 的语言包。
+    const LOCALE_VERSION = '2026-08-14-language-preference-freshness';
+    function initDecorativeImageDragGuard() {
+        const markImage = (img) => {
+            if (!(img instanceof HTMLImageElement)) return;
+            img.draggable = false;
+            img.setAttribute('draggable', 'false');
+        };
+
+        const markImages = (root = document) => {
+            if (root instanceof HTMLImageElement) {
+                markImage(root);
+                return;
+            }
+            if (!root.querySelectorAll) return;
+            root.querySelectorAll('img').forEach(markImage);
+        };
+
+        const start = () => {
+            markImages(document);
+
+            document.addEventListener('dragstart', (event) => {
+                const target = event.target;
+                if (target instanceof HTMLImageElement) {
+                    event.preventDefault();
+                }
+            }, true);
+
+            const observer = new MutationObserver((mutations) => {
+                mutations.forEach((mutation) => {
+                    mutation.addedNodes.forEach((node) => {
+                        if (node instanceof Element) {
+                            markImages(node);
+                        }
+                    });
+                });
+            });
+            observer.observe(document.documentElement, { childList: true, subtree: true });
+        };
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', start, { once: true });
+        } else {
+            start();
+        }
+    }
+
+    initDecorativeImageDragGuard();
+
+    function getLanguageFromQuery() {
+        try {
+            const params = new URLSearchParams(window.location.search || '');
+            const queryLanguage = normalizeSupportedLanguageCode(params.get('ui_lang') || params.get('lang'));
+            if (queryLanguage) {
+                return queryLanguage;
+            }
+        } catch (error) {
+            console.warn('[i18n] 解析 URL 语言参数失败:', error);
+        }
+        return '';
+    }
+
+    function normalizeSupportedLanguageCode(rawLanguage) {
+        const value = String(rawLanguage || '').trim();
+        if (!value) {
+            return '';
+        }
+        if (SUPPORTED_LANGUAGES.includes(value)) {
+            return value;
+        }
+        const lower = value.toLowerCase();
+        const langCode = lower.split('-')[0];
+        if (langCode === 'en') return 'en';
+        if (langCode === 'ja') return 'ja';
+        if (langCode === 'ko') return 'ko';
+        if (langCode === 'ru') return 'ru';
+        if (langCode === 'es') return 'es';
+        if (langCode === 'pt') return 'pt';
+        if (langCode === 'zh') {
+            if (/(tw|hk|hant)/i.test(value)) {
+                return 'zh-TW';
+            }
+            return 'zh-CN';
+        }
+        return '';
+    }
+
+    const CONVERSATION_LANGUAGE_STORAGE_PREFIX = 'nekoConversationLanguage:';
+    const CONVERSATION_LANGUAGE_UNTRUSTED_STORAGE_PREFIX = 'nekoConversationLanguageUntrusted:';
+    const conversationLanguageMemory = new Map();
+    const conversationLanguageUntrustedMemory = new Set();
+    const conversationLanguageRevisionByStorageKey = new Map();
+    let conversationLanguageRevisionClock = 0;
+    let conversationLanguageClearAllRevision = 0;
+    const NATIVE_LANGUAGE_OPTIONS = Object.freeze([
+        Object.freeze({ code: 'zh-CN', label: '简体中文' }),
+        Object.freeze({ code: 'zh-TW', label: '繁體中文' }),
+        Object.freeze({ code: 'en', label: 'English' }),
+        Object.freeze({ code: 'ja', label: '日本語' }),
+        Object.freeze({ code: 'ko', label: '한국어' }),
+        Object.freeze({ code: 'ru', label: 'Русский' }),
+        Object.freeze({ code: 'es', label: 'Español' }),
+        Object.freeze({ code: 'pt', label: 'Português' })
+    ]);
+
+    function resolveConversationLanguageCharacterName(characterName) {
+        const explicit = String(characterName || '').trim();
+        if (explicit) return explicit;
+        try {
+            return String(
+                (window.lanlan_config && window.lanlan_config.lanlan_name)
+                || (window.appState && window.appState.lanlan_name)
+                || window._currentCatgirl
+                || window.currentCatgirl
+                || ''
+            ).trim();
+        } catch (_) {
+            return '';
+        }
+    }
+
+    function conversationLanguageStorageKey(characterName) {
+        const name = resolveConversationLanguageCharacterName(characterName);
+        return name ? CONVERSATION_LANGUAGE_STORAGE_PREFIX + encodeURIComponent(name) : '';
+    }
+
+    function conversationLanguageUntrustedStorageKey(characterName) {
+        const name = resolveConversationLanguageCharacterName(characterName);
+        return name ? CONVERSATION_LANGUAGE_UNTRUSTED_STORAGE_PREFIX + encodeURIComponent(name) : '';
+    }
+
+    function bumpConversationLanguagePreferenceRevisionByStorageKey(storageKey) {
+        if (!storageKey) return conversationLanguageClearAllRevision;
+        const revision = ++conversationLanguageRevisionClock;
+        conversationLanguageRevisionByStorageKey.set(storageKey, revision);
+        return revision;
+    }
+
+    function getConversationLanguagePreferenceRevision(characterName) {
+        const storageKey = conversationLanguageStorageKey(characterName);
+        if (!storageKey) return conversationLanguageClearAllRevision;
+        return Math.max(
+            conversationLanguageClearAllRevision,
+            conversationLanguageRevisionByStorageKey.get(storageKey) || 0
+        );
+    }
+
+    function getCachedConversationLanguagePreference(characterName) {
+        const storageKey = conversationLanguageStorageKey(characterName);
+        if (!storageKey) return '';
+        try {
+            const stored = localStorage.getItem(storageKey);
+            const normalizedStored = normalizeSupportedLanguageCode(stored);
+            if (normalizedStored) {
+                conversationLanguageMemory.set(storageKey, normalizedStored);
+                return normalizedStored;
+            }
+        } catch (_) { /* fall back to the live per-page preference below */ }
+        return normalizeSupportedLanguageCode(conversationLanguageMemory.get(storageKey));
+    }
+
+    function isConversationLanguagePreferenceUntrusted(characterName) {
+        const untrustedKey = conversationLanguageUntrustedStorageKey(characterName);
+        if (!untrustedKey) return false;
+        try {
+            if (localStorage.getItem(untrustedKey) === '1') return true;
+        } catch (_) { /* use the in-page marker when storage is unavailable */ }
+        return conversationLanguageUntrustedMemory.has(untrustedKey);
+    }
+
+    // Standalone mini-game pages do not load the main websocket bundle, so
+    // keep their per-page fallback caches coherent here. A missing durable key
+    // cannot invalidate memory inside the getter itself: browsers may allow
+    // reads while rejecting writes, and that in-page choice must remain usable
+    // until an explicit cross-document storage event arrives.
+    if (typeof window.addEventListener === 'function') {
+        window.addEventListener('storage', function (event) {
+            if (event && event.key === null) {
+                conversationLanguageMemory.clear();
+                conversationLanguageUntrustedMemory.clear();
+                conversationLanguageRevisionByStorageKey.clear();
+                conversationLanguageClearAllRevision = ++conversationLanguageRevisionClock;
+                return;
+            }
+            const key = String(event && event.key || '');
+            if (key.startsWith(CONVERSATION_LANGUAGE_STORAGE_PREFIX)) {
+                const language = normalizeSupportedLanguageCode(event && event.newValue);
+                if (language) conversationLanguageMemory.set(key, language);
+                else conversationLanguageMemory.delete(key);
+                bumpConversationLanguagePreferenceRevisionByStorageKey(key);
+                return;
+            }
+            if (key.startsWith(CONVERSATION_LANGUAGE_UNTRUSTED_STORAGE_PREFIX)) {
+                if (event && event.newValue === '1') {
+                    conversationLanguageUntrustedMemory.add(key);
+                } else {
+                    conversationLanguageUntrustedMemory.delete(key);
+                }
+            }
+        });
+    }
+
+    window.NEKO_NATIVE_LANGUAGE_OPTIONS = NATIVE_LANGUAGE_OPTIONS;
+    window.getCachedConversationLanguagePreference = getCachedConversationLanguagePreference;
+    window.getConversationLanguagePreferenceRevision = getConversationLanguagePreferenceRevision;
+    window.getExplicitConversationLanguagePreference = function (characterName) {
+        const cachedLanguage = getCachedConversationLanguagePreference(characterName);
+        if (!cachedLanguage || isConversationLanguagePreferenceUntrusted(characterName)) return '';
+        return cachedLanguage;
+    };
+    window.getConversationLanguagePreference = function (characterName) {
+        const explicitLanguage = window.getExplicitConversationLanguagePreference(characterName);
+        if (explicitLanguage) return explicitLanguage;
+
+        // A failed server hydration can keep the last local value for rendering,
+        // but the untrusted marker prevents consumers from treating it as durable.
+        const cachedLanguage = getCachedConversationLanguagePreference(characterName);
+        if (cachedLanguage) return cachedLanguage;
+
+        const liveUiLanguage = normalizeSupportedLanguageCode(
+            (window.i18next && window.i18next.language)
+            || (window.i18n && window.i18n.language)
+            || ''
+        );
+        return liveUiLanguage || getBrowserLanguage();
+    };
+    window.markConversationLanguagePreferenceUntrusted = function (characterName) {
+        const untrustedKey = conversationLanguageUntrustedStorageKey(characterName);
+        if (!untrustedKey) return false;
+        try {
+            localStorage.setItem(untrustedKey, '1');
+            conversationLanguageUntrustedMemory.delete(untrustedKey);
+        } catch (_) {
+            conversationLanguageUntrustedMemory.add(untrustedKey);
+        }
+        return true;
+    };
+    window.setConversationLanguagePreference = function (language, characterName, options = {}) {
+        const normalized = normalizeSupportedLanguageCode(language);
+        if (!normalized) return false;
+        const name = resolveConversationLanguageCharacterName(characterName);
+        const storageKey = conversationLanguageStorageKey(name);
+        const untrustedKey = conversationLanguageUntrustedStorageKey(name);
+        if (!storageKey) return false;
+        conversationLanguageMemory.set(storageKey, normalized);
+        conversationLanguageUntrustedMemory.delete(untrustedKey);
+        bumpConversationLanguagePreferenceRevisionByStorageKey(storageKey);
+        let persisted = false;
+        try {
+            localStorage.setItem(storageKey, normalized);
+            persisted = true;
+        } catch (_) { /* keep the live event usable without storage */ }
+        if (persisted) {
+            try {
+                localStorage.removeItem(untrustedKey);
+            } catch (_) { /* the in-page trusted state is still updated */ }
+        }
+        if (options.dispatch !== false) {
+            window.dispatchEvent(new CustomEvent('neko:conversation-language-changed', {
+                detail: {
+                    language: normalized,
+                    character_name: name,
+                    source: options.source || 'local'
+                }
+            }));
+        }
+        return true;
+    };
+    window.clearConversationLanguagePreference = function (characterName, options = {}) {
+        const name = resolveConversationLanguageCharacterName(characterName);
+        const storageKey = conversationLanguageStorageKey(name);
+        const untrustedKey = conversationLanguageUntrustedStorageKey(name);
+        if (!storageKey) return false;
+        conversationLanguageMemory.delete(storageKey);
+        conversationLanguageUntrustedMemory.delete(untrustedKey);
+        bumpConversationLanguagePreferenceRevisionByStorageKey(storageKey);
+        try {
+            localStorage.removeItem(storageKey);
+        } catch (_) { /* the in-memory cache is still invalidated */ }
+        try {
+            localStorage.removeItem(untrustedKey);
+        } catch (_) { /* the in-page marker is still invalidated */ }
+        if (options.dispatch !== false) {
+            window.dispatchEvent(new CustomEvent('neko:conversation-language-cleared', {
+                detail: {
+                    character_name: name,
+                    source: options.source || 'local'
+                }
+            }));
+        }
+        return true;
+    };
 
     // 获取浏览器语言（同步，作为 fallback）
     function getBrowserLanguage() {
+        const queryLanguage = getLanguageFromQuery();
+        if (queryLanguage) {
+            return queryLanguage;
+        }
+
         // 1. 检查 localStorage
-        const savedLanguage = localStorage.getItem('i18nextLng');
+        let savedLanguage = '';
+        try {
+            savedLanguage = localStorage.getItem('i18nextLng') || '';
+        } catch (_) { /* continue with the browser locale */ }
         if (savedLanguage && SUPPORTED_LANGUAGES.includes(savedLanguage)) {
             return savedLanguage;
         }
@@ -43,23 +342,9 @@
         // 2. 检查浏览器语言设置
         const browserLanguage = navigator.language || navigator.userLanguage;
         if (browserLanguage) {
-            // 完全匹配
-            if (SUPPORTED_LANGUAGES.includes(browserLanguage)) {
-                return browserLanguage;
-            }
-            // 部分匹配（例如 'en-US' 匹配 'en'）
-            const langCode = browserLanguage.split('-')[0].toLowerCase();
-            if (langCode === 'en') return 'en';
-            if (langCode === 'ja') return 'ja';
-            if (langCode === 'ko') return 'ko';
-            if (langCode === 'ru') return 'ru';
-            if (langCode === 'zh') {
-                // 根据地区/脚本区分简繁（如 zh-TW / zh-HK / zh-Hant）
-                const upper = browserLanguage.toUpperCase();
-                if (upper.includes('TW') || upper.includes('HK') || upper.includes('HANT')) {
-                    return 'zh-TW';
-                }
-                return 'zh-CN';
+            const normalized = normalizeSupportedLanguageCode(browserLanguage);
+            if (normalized) {
+                return normalized;
             }
         }
 
@@ -67,45 +352,64 @@
         return 'zh-CN';
     }
 
-    // 从 Steam API 获取语言设置（异步）
-    async function getSteamLanguage() {
+    // 从后端获取语言设置（异步）：同一请求携带手工 UI 覆盖和 Steam 语言
+    async function getServerLanguagePreferences() {
         try {
             const response = await fetch('/api/config/steam_language', {
                 method: 'GET',
                 headers: { 'Content-Type': 'application/json' },
+                cache: 'no-store',
                 // 设置超时，避免阻塞太久
                 signal: AbortSignal.timeout(2000)
             });
 
             if (!response.ok) {
                 console.log('[i18n] Steam 语言 API 响应异常:', response.status);
-                return null;
+                return { uiLanguage: null, steamLanguage: null };
             }
 
             const data = await response.json();
             console.log('[i18n] Steam API 返回语言设置:', data);
 
-            if (data.success && data.i18n_language && SUPPORTED_LANGUAGES.includes(data.i18n_language)) {
-                return data.i18n_language;
+            const uiLanguage = normalizeSupportedLanguageCode(data && data.uiLanguage);
+            if (uiLanguage) {
+                console.log('[i18n] 使用 uiLanguage 覆盖语言:', uiLanguage);
             }
 
-            console.log('[i18n] Steam 语言 API 返回无效数据，回退到浏览器设置');
-            return null;
+            let steamLanguage = null;
+            if (data.success && data.i18n_language && SUPPORTED_LANGUAGES.includes(data.i18n_language)) {
+                steamLanguage = data.i18n_language;
+            }
+
+            if (!steamLanguage) {
+                console.log('[i18n] Steam 语言 API 返回无效数据，回退到浏览器设置');
+            }
+            return { uiLanguage, steamLanguage };
         } catch (error) {
             // 可能是超时或网络错误，静默处理
             console.log('[i18n] 无法从 Steam 获取语言设置，使用浏览器设置:', error.message);
-            return null;
+            return { uiLanguage: null, steamLanguage: null };
         }
     }
 
-    // 获取初始语言：优先 Steam 设置，然后 localStorage，然后浏览器设置，最后默认中文
+    // 获取初始语言：uiLanguage 强制覆盖 > URL 参数 > Steam 设置 > localStorage / 浏览器设置 > 默认中文
     async function getInitialLanguage() {
+        const serverLanguages = await getServerLanguagePreferences();
+        if (serverLanguages.uiLanguage) {
+            return serverLanguages.uiLanguage;
+        }
+
+        const queryLanguage = getLanguageFromQuery();
+        if (queryLanguage) {
+            localStorage.setItem('i18nextLng', queryLanguage);
+            return queryLanguage;
+        }
+
         // 1. 尝试从 Steam API 获取语言
-        const steamLanguage = await getSteamLanguage();
-        if (steamLanguage) {
+        if (serverLanguages.steamLanguage) {
             // 保存到 localStorage，下次可以直接使用
-            localStorage.setItem('i18nextLng', steamLanguage);
-            return steamLanguage;
+            localStorage.setItem('i18nextLng', serverLanguages.steamLanguage);
+            return serverLanguages.steamLanguage;
         }
 
         // 2. 回退到浏览器语言
@@ -866,6 +1170,37 @@
      * @param {string|object} message - Error message string or structured error object
      * @returns {string} Translated message
      */
+    function looksLikeApiKeyRejected(message) {
+        var parts = [];
+        if (typeof message === 'string') {
+            parts.push(message);
+        } else if (message && typeof message === 'object') {
+            parts.push(message.code || '', message.message || '');
+            if (message.details && typeof message.details === 'object') {
+                parts.push(
+                    message.details.error || '',
+                    message.details.msg || '',
+                    message.details.error_type || ''
+                );
+            }
+        }
+        var text = parts.join(' ').toLowerCase();
+        return text.indexOf('incorrect api key') !== -1 ||
+            text.indexOf('incorect api key') !== -1 ||
+            text.indexOf('invalid_api_key') !== -1 ||
+            text.indexOf('invalid api key') !== -1 ||
+            (
+                text.indexOf('authenticationerror') !== -1 &&
+                (
+                    text.indexOf('api key') !== -1 ||
+                    text.indexOf('invalid_api_key') !== -1 ||
+                    text.indexOf('invalid api key') !== -1 ||
+                    text.indexOf('incorrect api key') !== -1 ||
+                    text.indexOf('incorect api key') !== -1
+                )
+            );
+    }
+
     function translateStatusMessage(message) {
         // Attempt to parse JSON strings into objects
         if (typeof message === 'string') {
@@ -877,6 +1212,10 @@
             } catch (e) {
                 // Not valid JSON, keep as string
             }
+        }
+
+        if (looksLikeApiKeyRejected(message)) {
+            return i18next.t('errors.API_KEY_REJECTED');
         }
 
         // Support structured error objects: {"code": "XXX", "details": {...}}

@@ -5,13 +5,33 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+try:
+    import tomllib
+except ImportError:  # pragma: no cover
+    import tomli as tomllib  # type: ignore[no-redef]
 
 from plugin.sdk.shared.constants import EVENT_META_ATTR, NEKO_PLUGIN_META_ATTR, NEKO_PLUGIN_TAG
 from plugin.sdk.shared.core.base import DEFAULT_PLUGIN_VERSION as _DEFAULT_PLUGIN_VERSION
 from plugin.sdk.shared.core.base import NekoPluginBase as _SharedNekoPluginBase
 from plugin.sdk.shared.core.base import PluginMeta as _SharedPluginMeta
+from plugin.sdk.shared.core.base_runtime import (
+    resolve_plugin_cache_dir,
+    resolve_plugin_data_dir,
+    resolve_plugin_dir,
+    resolve_plugin_runtime_config_path,
+    resolve_plugin_storage_dir,
+)
 from plugin.sdk.shared.core.events import EventHandler, EventMeta
+from plugin.sdk.shared.core.types import PushMessageResult
+from plugin.sdk.shared.i18n import PluginI18n, load_plugin_i18n_from_meta
 from plugin.sdk.shared.models.exceptions import EntryConflictError
+
+from .llm_tool import (
+    LlmToolMeta,
+    collect_llm_tool_methods,
+    entry_id_for_tool,
+    validate_tool_name,
+)
 
 DEFAULT_PLUGIN_VERSION = _DEFAULT_PLUGIN_VERSION
 
@@ -29,22 +49,95 @@ class NekoPluginBase(_SharedNekoPluginBase):
         from .runtime import Plugins
 
         self.plugins = Plugins(self.ctx)
-        self._memory_client = None
         self._system_info_client = None
+        self.i18n = self._load_plugin_i18n()
         self._static_ui_config: dict[str, Any] | None = None
+        self._list_actions: list[dict[str, Any]] = []
         self._dynamic_entries: dict[str, dict[str, Any]] = {}
+        # plugin_id-scoped registry of LLM tools we've claimed locally.
+        # Tracks (name -> LlmToolMeta) so we can re-emit IPC notifications
+        # on demand and validate against duplicate registrations.
+        # The actual handler lives in ``_dynamic_entries[__llm_tool__name]``.
+        self._llm_tools: dict[str, LlmToolMeta] = {}
+        # Set to True after the first auto-registration pass so that
+        # subsequent lifecycle reloads don't double-register decorator-
+        # tagged methods. Manual calls to ``register_llm_tool`` are
+        # tracked separately via ``self._llm_tools``.
+        self._llm_tools_auto_registered: bool = False
+        # Auto-register every method tagged with ``@llm_tool``. Doing
+        # this at the end of ``super().__init__()`` means subclasses
+        # don't need to remember to call anything — the decorator alone
+        # is enough. The actual handler doesn't fire until the LLM
+        # picks the tool, so it's safe to register before subclass
+        # ``__init__`` finishes setting up state the handler reads
+        # (e.g. config dicts, service clients).
+        try:
+            self._register_decorated_llm_tools()
+        except Exception:
+            # Never let auto-registration prevent the plugin from
+            # constructing. The plugin can still register imperatively
+            # later and the host's IPC consumer logs the failure.
+            logger = getattr(self, "logger", None)
+            if logger is not None:
+                try:
+                    logger.exception("Auto-registration of @llm_tool methods failed")
+                except Exception:
+                    # Logger itself failed — nothing left to do; matches
+                    # the pattern used in ``_notify_host_comm`` above.
+                    pass
+
+    def _load_plugin_i18n(self) -> PluginI18n:
+        meta: dict[str, object] = {"config_path": str(self.config_dir / "plugin.toml")}
+        metadata = self.metadata
+        if isinstance(metadata.get("i18n"), Mapping):
+            meta["i18n"] = dict(metadata["i18n"])  # type: ignore[arg-type]
+            config_path_obj = metadata.get("config_path")
+            if isinstance(config_path_obj, (str, Path)):
+                meta["config_path"] = str(config_path_obj)
+            return load_plugin_i18n_from_meta(meta)
+
+        config_path = getattr(self.ctx, "config_path", None)
+        if isinstance(config_path, (str, Path)):
+            meta["config_path"] = str(config_path)
+            try:
+                with Path(config_path).open("rb") as stream:
+                    plugin_section = tomllib.load(stream).get("plugin")
+                if isinstance(plugin_section, Mapping) and isinstance(plugin_section.get("i18n"), Mapping):
+                    meta["i18n"] = dict(plugin_section["i18n"])  # type: ignore[arg-type]
+            except Exception:
+                pass
+        return load_plugin_i18n_from_meta(meta)
 
     @property
     def plugin_id(self) -> str:
         return str(getattr(self.ctx, "plugin_id", "plugin"))
 
     @property
+    def plugin_dir(self) -> Path:
+        """Return the installed plugin payload directory."""
+        return resolve_plugin_dir(self.ctx)
+
+    @property
     def config_dir(self) -> Path:
-        config_path = getattr(self.ctx, "config_path", None)
-        return Path(config_path).parent if config_path is not None else Path.cwd()
+        """Compatibility alias for :attr:`plugin_dir`."""
+        return self.plugin_dir
+
+    @property
+    def storage_dir(self) -> Path:
+        """Return the user storage directory assigned to this plugin."""
+        return resolve_plugin_storage_dir(self.ctx)
+
+    @property
+    def runtime_config_path(self) -> Path:
+        """Return the plugin's persistent runtime configuration path."""
+        return resolve_plugin_runtime_config_path(self.ctx)
 
     def data_path(self, *parts: str) -> Path:
-        base = self.config_dir / "data"
+        base = resolve_plugin_data_dir(self.ctx)
+        return base.joinpath(*parts) if parts else base
+
+    def cache_path(self, *parts: str) -> Path:
+        base = resolve_plugin_cache_dir(self.ctx)
         return base.joinpath(*parts) if parts else base
 
     @property
@@ -55,14 +148,6 @@ class NekoPluginBase(_SharedNekoPluginBase):
     @property
     def bus(self):
         return self.ctx.bus
-
-    @property
-    def memory(self):
-        if self._memory_client is None:
-            from .runtime import MemoryClient
-
-            self._memory_client = MemoryClient(self.ctx)
-        return self._memory_client
 
     @property
     def system_info(self):
@@ -79,28 +164,38 @@ class NekoPluginBase(_SharedNekoPluginBase):
         return await self.ctx.export_push(**kwargs)
 
     async def finish(self, **kwargs: Any) -> Any:
+        """Mark the current task done and hand a summary back to the host.
+
+        Role-aware text contract: ``summary`` / ``detail`` (and any text in
+        ``parts``) MAY contain ``{MASTER_NAME}`` / ``{LANLAN_NAME}``
+        placeholders. The host expands them at the LLM-injection boundary
+        (and at the verbatim ``direct_reply`` exit), per session. Plugin code
+        can't pick the right name itself — visibility filtering decides which
+        ``LLMSessionManager`` receives the text, so substitution has to be
+        host-side.
+
+        Use this for character-aware text like
+        ``"立即基于最新画面向 {MASTER_NAME} 叙述..."`` instead of hardcoded
+        ``"用户"`` / ``"master"`` / ``"主人"``, which feel generic and
+        misbehave on multi-character setups. See PLUGIN_DEVELOPMENT_GUIDE.md
+        ("Writing role-aware text") for details.
+        """
         return await self.ctx.finish(**kwargs)
 
-    def push_message(self, **kwargs: Any) -> object:
-        return self.ctx.push_message(**kwargs)
+    def push_message(self, **kwargs: Any) -> PushMessageResult:
+        """Stream a message from the plugin into the dialog channel.
 
-    def register_music_domains(self, domains: list[str] | str) -> None:
+        Role-aware text contract: ``text`` / ``summary`` / ``detail`` (and
+        any text in ``parts``) MAY contain ``{MASTER_NAME}`` /
+        ``{LANLAN_NAME}`` placeholders; the host substitutes them at the
+        injection boundary, per session. See :meth:`finish` for the rationale
+        and PLUGIN_DEVELOPMENT_GUIDE.md ("Writing role-aware text") for the
+        full guide.
+
+        The returned receipt only reports immediate local submission.  It is
+        not a host-consumption, generation, or playback acknowledgement.
         """
-        向前端注册合法的音乐源域名白名单。
-        
-        后端插件如果需要动态播放来自第三方域名的音乐（例如 AI 回复的 URL），
-        可以通过此方法通知前端将其域名加入安全白名单，避免播放被拦截。
-        
-        Args:
-            domains: 域名字符串或域名列表 (支持完整 URL，会自动提取 hostname)
-        """
-        if isinstance(domains, str):
-            domains = [domains]
-        self.push_message(
-            source=self.plugin_id,
-            message_type="music_allowlist_add",
-            metadata={"domains": list(domains)}
-        )
+        return self.ctx.push_message(**kwargs)
 
     def include_router(self, router, *, prefix: str = "") -> None:
         super().include_router(router, prefix=prefix)
@@ -142,6 +237,13 @@ class NekoPluginBase(_SharedNekoPluginBase):
             "type": "STATIC_UI_REGISTER",
             "plugin_id": self.plugin_id,
             "config": dict(config),
+        })
+
+    def _notify_list_actions_updated(self, actions: list[dict[str, Any]]) -> None:
+        self._notify_host_comm({
+            "type": "LIST_ACTIONS_UPDATE",
+            "plugin_id": self.plugin_id,
+            "actions": [dict(action) for action in actions],
         })
 
     def _notify_dynamic_entry_registered(self, entry_id: str, meta: EventMeta, *, enabled: bool = True) -> None:
@@ -191,6 +293,39 @@ class NekoPluginBase(_SharedNekoPluginBase):
 
     def get_static_ui_config(self) -> dict[str, Any] | None:
         return self._static_ui_config
+
+    def set_list_actions(self, actions: list[Mapping[str, Any]]) -> bool:
+        normalized: list[dict[str, Any]] = []
+        for index, action in enumerate(actions):
+            if not isinstance(action, Mapping):
+                raise TypeError(f"list action at index {index} must be a mapping")
+            action_id = action.get("id")
+            if not isinstance(action_id, str) or not action_id.strip():
+                raise ValueError(f"list action at index {index} must define a non-empty 'id'")
+            normalized.append({str(key): value for key, value in action.items() if isinstance(key, str)})
+        self._list_actions = normalized
+        self._notify_list_actions_updated(self._list_actions)
+        return True
+
+    def register_list_action(self, action: Mapping[str, Any]) -> bool:
+        if not isinstance(action, Mapping):
+            raise TypeError("action must be a mapping")
+        action_id = action.get("id")
+        if not isinstance(action_id, str) or not action_id.strip():
+            raise ValueError("action must define a non-empty 'id'")
+        action_id = action_id.strip()
+        normalized = {str(key): value for key, value in action.items() if isinstance(key, str)}
+        normalized["id"] = action_id
+        next_actions = [item for item in self._list_actions if item.get("id") != action_id]
+        next_actions.append(normalized)
+        return self.set_list_actions(next_actions)
+
+    def clear_list_actions(self) -> None:
+        self._list_actions = []
+        self._notify_list_actions_updated([])
+
+    def get_list_actions(self) -> list[dict[str, Any]]:
+        return [dict(action) for action in self._list_actions]
 
     def register_dynamic_entry(
         self,
@@ -339,6 +474,181 @@ class NekoPluginBase(_SharedNekoPluginBase):
         updater = getattr(self.ctx, "update_status", None)
         if callable(updater):
             updater(status)
+
+    # ------------------------------------------------------------------
+    # LLM tool registration
+    # ------------------------------------------------------------------
+    #
+    # Plugins can expose model-callable tools two ways:
+    #
+    # 1. Declaratively via ``@llm_tool`` on an instance method. Auto-
+    #    discovered by ``_register_decorated_llm_tools`` during startup.
+    #
+    # 2. Imperatively via ``self.register_llm_tool(...)`` for tools whose
+    #    schema is computed at runtime (e.g. derived from configuration).
+    #
+    # Both paths funnel through ``_register_llm_tool_internal``: the
+    # handler is stored as a dynamic plugin entry under the reserved
+    # ``__llm_tool__{name}`` id, and an LLM_TOOL_REGISTER IPC message is
+    # emitted so the host can register the tool with main_server.
+    # See ``plugin/sdk/plugin/llm_tool.py`` for the on-method metadata
+    # shape and ``plugin/server/messaging/llm_tool_registry.py`` for
+    # the host-side registration logic.
+
+    def _notify_llm_tool_registered(self, meta: "LlmToolMeta") -> None:
+        self._notify_host_comm(meta.to_ipc_payload(plugin_id=self.plugin_id))
+
+    def _notify_llm_tool_unregistered(self, name: str, *, role: str | None = None) -> None:
+        self._notify_host_comm({
+            "type": "LLM_TOOL_UNREGISTER",
+            "plugin_id": self.plugin_id,
+            "name": name,
+            "role": role,
+        })
+
+    def _register_llm_tool_internal(
+        self,
+        meta: "LlmToolMeta",
+        handler: Any,
+    ) -> None:
+        """Common path used by both the decorator collector and the
+        imperative ``register_llm_tool`` instance method.
+
+        Stores the handler as a dynamic plugin entry under the reserved
+        id, then notifies the host so main_server gets the
+        registration.
+        """
+        if not callable(handler):
+            raise TypeError("LLM tool handler must be callable")
+        if meta.name in self._llm_tools:
+            raise EntryConflictError(f"duplicate LLM tool name: {meta.name!r}")
+        # The dynamic entry path expects an ``input_schema`` (== JSON
+        # Schema for arguments) and ``description``. We reuse the same
+        # schema we'll send to main_server so a single source of truth
+        # drives both surfaces.
+        entry_id = entry_id_for_tool(meta.name)
+        self.register_dynamic_entry(
+            entry_id=entry_id,
+            handler=handler,
+            name=meta.name,
+            description=meta.description,
+            input_schema=dict(meta.parameters),
+            kind="action",
+            timeout=meta.timeout_seconds,
+        )
+        self._llm_tools[meta.name] = meta
+        self._notify_llm_tool_registered(meta)
+
+    def register_llm_tool(
+        self,
+        *,
+        name: str,
+        description: str,
+        parameters: dict[str, Any] | None,
+        handler: Any,
+        timeout: float = 30.0,
+        role: str | None = None,
+    ) -> bool:
+        """Register an LLM tool at runtime.
+
+        Use this for tools whose schema or set of arguments isn't known
+        at class-definition time (e.g. driven by user configuration).
+        Otherwise prefer the ``@llm_tool`` decorator which is auto-
+        registered during startup.
+
+        Parameters
+        ----------
+        name:
+            Model-visible tool identifier. Validated against the same
+            pattern as the decorator (see ``validate_tool_name``).
+        description:
+            Free-text shown to the LLM. Be specific about behaviour.
+        parameters:
+            JSON Schema for the tool's arguments. ``None`` means no
+            arguments.
+        handler:
+            Callable invoked when the LLM picks the tool. Receives the
+            parsed JSON arguments as kwargs.
+        timeout:
+            Per-call timeout in seconds. Capped at 300s server-side.
+        role:
+            Optional role/character to scope to. ``None`` is global.
+
+        Returns ``True`` on success. Raises ``ValueError`` for invalid
+        names and ``EntryConflictError`` for duplicates.
+        """
+        validate_tool_name(name)
+        meta = LlmToolMeta(
+            name=name,
+            description=description or "",
+            parameters=dict(parameters) if isinstance(parameters, dict) else {"type": "object", "properties": {}},
+            timeout_seconds=float(timeout),
+            role=role,
+        )
+        self._register_llm_tool_internal(meta, handler)
+        return True
+
+    def unregister_llm_tool(self, name: str) -> bool:
+        """Unregister a previously-registered LLM tool by name.
+
+        Removes the dynamic entry locally and notifies the host so the
+        registration is also dropped from main_server. Returns ``True``
+        if the tool existed and was removed, ``False`` otherwise.
+        """
+        meta = self._llm_tools.pop(name, None)
+        if meta is None:
+            return False
+        self.unregister_dynamic_entry(entry_id_for_tool(name))
+        self._notify_llm_tool_unregistered(name, role=meta.role)
+        return True
+
+    def list_llm_tools(self) -> list[dict[str, Any]]:
+        """Return the LLM tools this plugin currently has registered."""
+        return [
+            {
+                "name": meta.name,
+                "description": meta.description,
+                "parameters": dict(meta.parameters),
+                "timeout_seconds": meta.timeout_seconds,
+                "role": meta.role,
+            }
+            for meta in self._llm_tools.values()
+        ]
+
+    def _register_decorated_llm_tools(self) -> int:
+        """Discover every ``@llm_tool``-decorated method on ``self`` and
+        register them as LLM tools.
+
+        Idempotent across calls — the second invocation is a no-op
+        because ``self._llm_tools`` already holds the registrations.
+        Called automatically from the SDK's startup lifecycle hook.
+        Returns the number of tools registered on this call.
+        """
+        if self._llm_tools_auto_registered:
+            return 0
+        registered = 0
+        for meta, bound in collect_llm_tool_methods(self):
+            if meta.name in self._llm_tools:
+                continue
+            try:
+                self._register_llm_tool_internal(meta, bound)
+                registered += 1
+            except EntryConflictError:
+                # Surface but don't crash the plugin — the rest of
+                # startup should still proceed.
+                logger = getattr(self, "logger", None)
+                if logger is not None:
+                    try:
+                        logger.warning(
+                            "Skipping LLM tool '{}' — entry id collision",
+                            meta.name,
+                        )
+                    except Exception:
+                        # Logger itself failed — swallow; same idiom as
+                        # ``_notify_host_comm`` above.
+                        pass
+        self._llm_tools_auto_registered = True
+        return registered
 
 
 __all__ = [

@@ -1,15 +1,36 @@
 # -*- coding: utf-8 -*-
+# Copyright 2025-2026 Project N.E.K.O. Team
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """
 Cookies Login Router - Enhanced
 
-Handles authentication-related endpoints with strict validation and 
+Handles authentication-related endpoints with strict validation and
 unified logic for credential management.
+
+URL convention: routes declared WITHOUT trailing slash (no ``@router.get('/')``).
+See ``main_routers/characters_router.py`` docstring or
+``.agent/rules/neko-guide.md`` (§"API URL 末尾不带斜杠") for the rationale;
+enforced by ``scripts/check_api_trailing_slash.py``.
 """
 
+import asyncio
 import re
 import io
 import base64
 from typing import Dict, Optional
+from urllib.parse import parse_qsl, urlparse
 
 import qrcode
 import httpx
@@ -25,9 +46,10 @@ from utils.cookies_login import (
     load_cookies_from_file,
     parse_cookie_string,
     COOKIE_FILES,
-    CONFIG_DIR
+    get_cookie_key_file,
 )
 from utils.logger_config import get_module_logger
+from utils.twitch_auth import TwitchAuthService
 
 logger = get_module_logger(__name__, "Main")
 
@@ -38,7 +60,7 @@ SUSPICIOUS_PATTERN = re.compile(
 )
 
 def verify_local_access(request: Request):
-    """🛡️ 纵深防御：拦截非本地主机的越权访问尝试"""
+    """🛡️ Defense in depth: block unauthorized access attempts from non-local hosts."""
     client_host = getattr(request.client, "host", None) if request.client else None
     
     allowed_hosts = ["127.0.0.1", "::1", "localhost"]
@@ -53,6 +75,18 @@ def verify_local_access(request: Request):
 router = APIRouter(prefix="/api/auth", tags=["认证管理"], dependencies=[Depends(verify_local_access)])
 templates = Jinja2Templates(directory="templates")
 login_manager = PlatformLoginManager()
+twitch_auth_service = TwitchAuthService()
+
+# Only these credential types can back the personal-dynamics proactive source.
+# Keep this aligned with ``utils.web_scraper.personal_dynamics``.
+PERSONAL_DYNAMIC_PLATFORMS = frozenset({
+    "bilibili",
+    "douyin",
+    "kuaishou",
+    "weibo",
+    "reddit",
+    "twitter",
+})
 
 # ============ 0. 数据模型与校验 ============
 
@@ -65,20 +99,36 @@ class CookieSubmit(BaseModel):
     @field_validator("cookie_string")
     @classmethod
     def check_suspicious_patterns(cls, v: str) -> str:
-        """安全加固：拦截 XSS 或 SQL 注入特征"""
+        """Security hardening: block XSS or SQL injection patterns."""
         if SUSPICIOUS_PATTERN.search(v):
             logger.warning(f"🚨 检测到恶意内容注入尝试！恶意内容注入，length={len(v)}")
             raise ValueError("检测到非法或危险字符，请求已被系统拦截。")
         return v
 
 
+class TwitchDeviceSubmit(BaseModel):
+    """The public Twitch Developer Client ID used for Device Code authorization."""
+
+    client_id: str = Field(..., min_length=8, max_length=80, pattern=r"^[A-Za-z0-9]+$")
+
+
 # ============ 1. 内部辅助逻辑 ============
 
 def validate_platform_fields(platform: str, cookies: Dict[str, str]):
-    """统一的各平台核心字段防呆校验"""
+    """Unified sanity validation of core fields for each platform."""
+    if platform == "youtube":
+        if not cookies.get("SAPISID"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="格式错误：未检测到必需字段 SAPISID"
+            )
+        return
+
     platform_validations = {
         "netease": ["MUSIC_U"],
+        "qqmusic": ["uin", "qqmusic_key"],
         "bilibili": ["SESSDATA"],
+        "xhh": ["user_heybox_id", "user_pkey"],
         "douyin": ["sessionid", "ttwid"],
         "kuaishou": ["kuaishou.server.web_st", "userId"], 
         "weibo": ["SUB"],
@@ -100,8 +150,24 @@ def validate_platform_fields(platform: str, cookies: Dict[str, str]):
 
 @router.get("/page", response_class=HTMLResponse, summary="凭证管理可视化后台入口")
 async def render_auth_page(request: Request):
-    """访问凭证管理网页 (限制仅本地访问)"""
-    return templates.TemplateResponse("cookies_login.html", {"request": request})
+    """Credential management page (local access only)."""
+    from config import APP_VERSION
+
+    return templates.TemplateResponse("cookies_login.html", {
+        "request": request,
+        "static_asset_version": APP_VERSION,
+    })
+
+
+@router.get("/guide", response_class=HTMLResponse, summary="浏览器凭证获取教程")
+async def render_auth_guide(request: Request):
+    """Standalone browser credential guide (local access only)."""
+    from config import APP_VERSION
+
+    return templates.TemplateResponse("cookies_guide.html", {
+        "request": request,
+        "static_asset_version": APP_VERSION,
+    })
 
 # ============ 3. API 核心功能 ============
 
@@ -130,6 +196,13 @@ async def save_cookie(data: CookieSubmit):
         supported_platforms = login_manager.get_supported_platforms()
         if data.platform not in supported_platforms:
             raise HTTPException(status_code=400, detail=f"不支持的平台: {data.platform}")
+        platform_info = supported_platforms[data.platform]
+        if "manual" not in platform_info.get("methods", []):
+            method = platform_info.get("default_method") or "平台专用授权流程"
+            raise HTTPException(
+                status_code=400,
+                detail=f"{platform_info['name']} 凭证只能通过 {method} 授权保存",
+            )
             
         # 2. 解析与验证
         cookies = parse_cookie_string(data.cookie_string)
@@ -140,7 +213,7 @@ async def save_cookie(data: CookieSubmit):
         
         # 3. 存储
         encrypt = data.encrypt if data.encrypt is not None else True
-        success = save_cookies_to_file(data.platform, cookies, encrypt=encrypt)
+        success = await asyncio.to_thread(save_cookies_to_file, data.platform, cookies, encrypt=encrypt)
         
         if success:
             return {
@@ -157,18 +230,43 @@ async def save_cookie(data: CookieSubmit):
         logger.debug(f"详细错误: {e}")  # debug 级别记录详情
         raise HTTPException(status_code=500, detail="内部服务器错误")
 
+
+@router.post("/twitch/device/start", summary="启动 Twitch Device Code 授权")
+async def start_twitch_device_authorization(data: TwitchDeviceSubmit):
+    """Start a local-only OAuth Device Code flow without returning secrets."""
+    result = await twitch_auth_service.start(data.client_id)
+    if result.get("success"):
+        return result
+    raise HTTPException(status_code=502, detail="无法启动 Twitch 授权，请检查 Client ID 或网络连接")
+
+
+@router.post("/twitch/device/check", summary="检查 Twitch Device Code 授权")
+async def check_twitch_device_authorization(data: TwitchDeviceSubmit):
+    """Poll Twitch once; successful credentials are encrypted before returning."""
+    result = await twitch_auth_service.check_device_code(data.client_id)
+    if result.get("success"):
+        return result
+    code = result.get("code")
+    if code in {"device_authorization_not_active", "device_authorization_expired"}:
+        raise HTTPException(status_code=400, detail="Twitch 授权已失效，请重新开始授权")
+    raise HTTPException(status_code=502, detail="Twitch 授权检查失败，请稍后重试")
+
 @router.get("/cookies/status", summary="获取所有平台Cookie状态汇总")
 async def get_all_cookies_status():
-    """返回每个支持平台的 Cookie 存在状态（前端个人动态功能使用）"""
+    """Return cookie presence status for each supported platform (used by the frontend personal-feed feature)."""
     try:
         platforms = login_manager.get_supported_platforms()
-        result = {}
-        for platform_key in platforms:
-            cookies = load_cookies_from_file(platform_key)
-            result[platform_key] = {
+        loaded = await asyncio.gather(
+            *(asyncio.to_thread(load_cookies_from_file, p) for p in platforms)
+        )
+        result = {
+            platform_key: {
                 "has_cookies": bool(cookies),
                 "cookies_count": len(cookies) if cookies else 0,
+                "supports_personal_dynamic": platform_key in PERSONAL_DYNAMIC_PLATFORMS,
             }
+            for platform_key, cookies in zip(platforms, loaded)
+        }
         return {"success": True, "data": result}
     except Exception as e:
         logger.error(f"获取所有 cookie 状态失败: {type(e).__name__}")
@@ -179,8 +277,12 @@ async def get_platform_cookies(platform: str):
     supported = login_manager.get_supported_platforms()
     if platform not in supported:
         raise HTTPException(status_code=400, detail="平台无效")
+
+    if platform == "twitch":
+        status_data = await twitch_auth_service.status()
+        return {"success": True, "data": status_data}
             
-    cookies = load_cookies_from_file(platform)
+    cookies = await asyncio.to_thread(load_cookies_from_file, platform)
     if not cookies:
         return {"success": True, "data": {"platform": platform, "has_cookies": False}}
             
@@ -214,7 +316,7 @@ async def delete_platform_cookies(platform: str):
         raise HTTPException(status_code=500, detail="删除 cookie 文件失败，请检查系统权限")
 
     # Step 2: 删除关联密钥文件（独立 try/except，失败不影响 cookie 已删除的结果）
-    key_file = CONFIG_DIR / f"{platform}_key.key"
+    key_file = get_cookie_key_file(platform)
     if key_file.exists():
         try:
             key_file.unlink()
@@ -232,7 +334,7 @@ async def delete_platform_cookies(platform: str):
 
 @router.post("/save_cookie", summary="保存Cookie(兼容旧版)")
 async def api_save_cookie_legacy(data: CookieSubmit):
-    """通过调用统一逻辑来消除冗余"""
+    """Eliminate redundancy by delegating to the unified logic."""
     try:  
         result = await save_cookie(data)
         logger.info(f"✅ 兼容版cookies保存成功 | 平台: {data.platform}")
@@ -272,12 +374,136 @@ def get_nested_value(data: dict, path: str, default=None):
     return value
 
 
+_XHH_API_BASE = "https://api.xiaoheihe.cn"
+_XHH_QR_CREATE_PATH = "/account/get_qrcode_url/"
+_XHH_QR_POLL_PATH = "/account/qr_state/"
+_XHH_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/125.0.0.0 Safari/537.36"
+    ),
+    "Referer": "https://www.xiaoheihe.cn/",
+    "Accept": "application/json, text/plain, */*",
+}
+
+
+def _render_qrcode_data_url(qrcode_url: str) -> str:
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_H,
+        box_size=10,
+        border=4,
+    )
+    qr.add_data(qrcode_url)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
+async def _request_xhh_qr(path: str, extra_params: dict | None = None):
+    params = login_manager.build_request_params("xhh", path, extra=extra_params)
+    async with httpx.AsyncClient(follow_redirects=True, trust_env=True) as client:
+        response = await client.get(
+            f"{_XHH_API_BASE}{path}",
+            params=params,
+            headers=_XHH_HEADERS,
+            timeout=10,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=502, detail="小黑盒返回了无效响应")
+    return response, payload
+
+
+async def _get_xhh_qr_code():
+    _, payload = await _request_xhh_qr(_XHH_QR_CREATE_PATH)
+    if str(payload.get("status") or "").lower() != "ok":
+        raise HTTPException(
+            status_code=502,
+            detail=str(payload.get("msg") or "小黑盒二维码获取失败"),
+        )
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    qrcode_url = str(result.get("qr_url") or "").strip()
+    parsed = urlparse(qrcode_url)
+    if not qrcode_url or not parsed.query:
+        raise HTTPException(status_code=502, detail="小黑盒二维码数据解析失败")
+    timeout = int(result.get("expire") or 180)
+    return {
+        "success": True,
+        "data": {
+            "qrcode_key": parsed.query,
+            "qrcode_url": qrcode_url,
+            "qrcode_image": _render_qrcode_data_url(qrcode_url),
+            "timeout": timeout,
+        },
+    }
+
+
+async def _poll_xhh_qr_login(qrcode_key: str):
+    state_params = dict(parse_qsl(qrcode_key, keep_blank_values=True))
+    if not state_params:
+        raise HTTPException(status_code=400, detail="小黑盒二维码状态参数无效")
+    response, payload = await _request_xhh_qr(_XHH_QR_POLL_PATH, state_params)
+    if str(payload.get("status") or "").lower() != "ok":
+        raise HTTPException(
+            status_code=502,
+            detail=str(payload.get("msg") or payload.get("message") or "小黑盒登录状态查询失败"),
+        )
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    error = str(result.get("error") or "").strip()
+    message = str(result.get("error_msg") or payload.get("msg") or "等待扫码").strip()
+    if error.lower() != "ok":
+        normalized = f"{error} {message}".lower()
+        if any(marker in normalized for marker in ("expired", "expire", "过期", "失效")):
+            qr_status = "expired"
+        elif any(marker in normalized for marker in ("scanned", "已扫码", "确认")):
+            qr_status = "scanned"
+        else:
+            qr_status = "waiting"
+        return {
+            "success": False,
+            "data": {"code": error or "waiting", "status": qr_status, "message": message},
+        }
+
+    cookies = {str(key): str(value) for key, value in response.cookies.items() if value}
+    if not cookies:
+        raise HTTPException(status_code=502, detail="小黑盒扫码成功但未返回登录凭证")
+    validate_platform_fields("xhh", cookies)
+    try:
+        save_ok = await asyncio.to_thread(save_cookies_to_file, "xhh", cookies)
+    except Exception as save_error:
+        save_ok = False
+        logger.warning(f"⚠️ 小黑盒登录凭证自动保存异常 (不影响登录): {type(save_error).__name__}")
+    else:
+        if not save_ok:
+            logger.warning("⚠️ 小黑盒登录凭证自动保存失败 (不影响登录)")
+    return {
+        "success": True,
+        "data": {
+            "code": "ok",
+            "status": "success",
+            "message": str(result.get("nickname") or "登录成功"),
+            "cookies": cookies,
+            "cookie_fields": NetworkQRLoginInfo["xhh"]["cookie_fields"],
+            "cookies_count": len(cookies),
+            "local_save_failed": not save_ok,
+        },
+    }
+
+
 @router.post("/get_QR", summary="获取登陆二维码")
 async def api_get_qr_code(
     platform: str = Body(..., min_length=2, max_length=20, pattern=r"^[a-zA-Z0-9_-]+$", embed=True)
 ):
     if platform not in NetworkQRLoginInfo:
         raise HTTPException(status_code=400, detail=f"不支持的平台: {platform}")
+
+    if platform == "xhh":
+        return await _get_xhh_qr_code()
     
     config = NetworkQRLoginInfo[platform]
     response_config = config.get("response", {})
@@ -285,6 +511,7 @@ async def api_get_qr_code(
     try:
         import time
         ts = str(int(time.time() * 1000))
+        # per-call AsyncClient: 用户扫码登录触发，冷路径（且每次访问外部平台 host 不同）
         async with httpx.AsyncClient() as client:
             req_method = config.get("method", "GET").upper()
             raw_get_params = config.get("get_params", {})
@@ -356,10 +583,13 @@ async def api_get_qr_code(
 @router.post("/QRLogin", summary="二维码登陆")
 async def api_qr_login_poll(
     platform: str = Body(..., min_length=2, max_length=20, pattern=r"^[a-zA-Z0-9_-]+$", embed=True),
-    qrcode_key: str = Body(..., min_length=10, max_length=100, embed=True)
+    qrcode_key: str = Body(..., min_length=3, max_length=100, embed=True)
 ):
     if platform not in NetworkQRLoginInfo:
         raise HTTPException(status_code=400, detail=f"不支持的平台: {platform}")
+
+    if platform == "xhh":
+        return await _poll_xhh_qr_login(qrcode_key)
     
     config = NetworkQRLoginInfo[platform]
     response_config = config.get("response", {})
@@ -374,11 +604,12 @@ async def api_qr_login_poll(
         raw_poll_params = config.get("poll_params", {"qrcode_key": "{{qrcode_key}}"})
         processed_params = {k: (v.replace("{{qrcode_key}}", qrcode_key).replace("{{timestamp}}", ts) if isinstance(v, str) else v) for k, v in raw_poll_params.items()}
 
+        # per-call AsyncClient: 扫码轮询登录，用户触发冷路径
         async with httpx.AsyncClient() as client:
             if req_method == "POST":
                 response = await client.post(
-                    url=config["login"], 
-                    data=processed_params, 
+                    url=config["login"],
+                    data=processed_params,
                     headers=config["headers"],
                     timeout=10
                 )
@@ -424,7 +655,7 @@ async def api_qr_login_poll(
             if cookies and cookie_fields:
                 filtered_cookies = {k: v for k, v in cookies.items() if k in cookie_fields}
                 if filtered_cookies:
-                    save_ok = save_cookies_to_file(platform, filtered_cookies)
+                    save_ok = await asyncio.to_thread(save_cookies_to_file, platform, filtered_cookies)
                     if save_ok:
                         logger.info(f"✅ {platform} QR 登录凭证已自动持久化")
                     else:
@@ -463,6 +694,15 @@ async def api_qr_login_poll(
 
 #存在用于直接复制后替换内容的方便示例,不需要检查NetworkQRLoginInfo["示例"]内部的东西
 NetworkQRLoginInfo = {
+    "xhh": {
+        "get": f"{_XHH_API_BASE}{_XHH_QR_CREATE_PATH}",
+        "login": f"{_XHH_API_BASE}{_XHH_QR_POLL_PATH}",
+        "timeout": 180,
+        "cookie_fields": ["user_heybox_id", "user_pkey"],
+        "headers": _XHH_HEADERS,
+        "response": {},
+        "status_codes": {},
+    },
     "bilibili": {
         "get": "https://passport.bilibili.com/x/passport-login/web/qrcode/generate",
         "login": "https://passport.bilibili.com/x/passport-login/web/qrcode/poll",

@@ -1,6 +1,8 @@
 # N.E.K.O 插件系统开发指南
 
-> SDK v2 完整开发教程，包含 Plugin / Extension / Adapter 三种开发范式
+> SDK v2 完整开发教程。平台支持 Plugin / Adapter 两种插件包；Router 用于普通 Plugin 内部组合。
+>
+> 本轮接口收敛的完整替代关系见 [`docs/zh-CN/plugins/migration-v0.9.md`](../docs/zh-CN/plugins/migration-v0.9.md)。
 
 ## 目录
 
@@ -10,7 +12,7 @@
 - [第四章：装饰器详解](#第四章装饰器详解)
 - [第五章：上下文与运行时](#第五章上下文与运行时)
 - [第六章：完整示例](#第六章完整示例)
-- [第七章：Extension 扩展开发](#第七章extension-扩展开发)
+- [第七章：Router 组合](#第七章router-组合)
 - [第八章：Adapter 适配器开发](#第八章adapter-适配器开发)
 - [第九章：高级主题](#第九章高级主题)
 - [第十章：最佳实践](#第十章最佳实践)
@@ -23,39 +25,37 @@
 
 ### 1.1 什么是 N.E.K.O 插件系统？
 
-N.E.K.O 插件系统是一个基于 Python 的插件框架，允许开发者创建可扩展的功能模块。每个插件运行在独立的进程中，通过 ZMQ IPC 与主系统交互。
+N.E.K.O 插件系统是一个基于 Python 的插件框架，允许开发者创建可组合的功能模块。Plugin 与 Adapter 运行在独立进程中，通过 ZMQ IPC 与主系统交互。
 
-### 1.2 三种开发范式
+### 1.2 包类型
 
 | 范式 | 导入路径 | 用途 | 运行方式 |
 |------|---------|------|---------|
 | **Plugin** | `plugin.sdk.plugin` | 独立功能（搜索、提醒等） | 独立进程 |
-| **Extension** | `plugin.sdk.extension` | 为现有插件添加路由/钩子 | 注入宿主插件进程 |
 | **Adapter** | `plugin.sdk.adapter` | 对接外部协议（MCP、NoneBot 等） | 独立进程 + 网关管线 |
 
 **如何选择？**
 
 - **「我想添加一个新的独立功能」** → 用 **Plugin**（99% 的开发者只需要这个）
-- **「我想给现有插件添加额外命令」** → 用 **Extension**
+- **「我想在现有功能周围增加命令」** → 使用普通 **Plugin**；若你维护原宿主且代码很大，可使用 `PluginRouter`
 - **「我想把 MCP/NoneBot 等外部协议请求转发给插件」** → 用 **Adapter**
 
 ### 1.3 核心特性
 
-- **进程隔离**：每个插件运行在独立进程中，崩溃不影响主系统
+- **进程隔离**：Plugin 与 Adapter 独立运行
 - **异步支持**：支持同步和异步入口函数
 - **Result 类型**：`Ok`/`Err` 类型安全的错误处理（替代异常流）
 - **Hook 系统**：`@before_entry`, `@after_entry`, `@around_entry`, `@replace_entry` 面向切面编程
 - **跨插件调用**：`self.plugins.call_entry("other_plugin:entry_id")` 插件间通信
-- **Memory 客户端**：`self.memory` 访问宿主记忆系统
 - **系统信息**：`self.system_info` 查询宿主元数据
 - **持久化存储**：`PluginStore` 键值对持久化
-- **Bus 系统**：`self.bus` 事件发布/订阅
+- **Bus 系统**：`self.bus` 读取宿主状态并监听 `add` / `del` / `change`；不提供发布接口
 - **动态入口**：运行时注册/注销入口点
 - **静态 UI**：从插件目录提供 Web UI
 - **生命周期**：`startup`, `shutdown`, `reload`, `freeze`, `unfreeze`, `config_change`
 - **定时任务**：`@timer_interval` 周期执行
 - **消息处理**：`@message` 响应主系统消息
-- **音乐播放**：`self.register_music_domains` 与 `music_play_url` 跨进程音频控制
+- **音乐播放**：`push_message` + `parts=[{type:'ui_action', action:'media_*'}]` 跨进程音频控制
 
 ### 1.4 系统架构
 
@@ -66,7 +66,6 @@ N.E.K.O 插件系统是一个基于 Python 的插件框架，允许开发者创�
 │  │   Plugin Host (core/)                        │  │
 │  │   - 插件生命周期管理                          │  │
 │  │   - Bus 系统 (memory, events, messages)      │  │
-│  │   - Extension 注入                           │  │
 │  │   - ZMQ IPC 传输                             │  │
 │  └──────────────────────────────────────────────┘  │
 │  ┌──────────────────────────────────────────────┐  │
@@ -77,10 +76,10 @@ N.E.K.O 插件系统是一个基于 Python 的插件框架，允许开发者创�
 │  └──────────────────────────────────────────────┘  │
 └────────────────────┬───────────────────────────────┘
                      │ ZMQ IPC
-      ┌──────────────┼──────────────┬────────────────┐
-      ▼              ▼              ▼                ▼
-  Plugin A       Plugin B      Extension C      Adapter D
-  (独立进程)     (独立进程)     (注入宿主)       (独立进程)
+      ┌──────────────┼──────────────┐
+      ▼              ▼              ▼
+  Plugin A       Plugin B       Adapter D
+  (独立进程)     (独立进程)      (独立进程)
 ```
 
 ### 1.5 SDK 包结构
@@ -88,7 +87,6 @@ N.E.K.O 插件系统是一个基于 Python 的插件框架，允许开发者创�
 ```text
 plugin/sdk/
 ├── plugin/         ← 标准插件开发入口（99% 的开发者只需要这个）
-├── extension/      ← 扩展开发入口（为现有插件添加路由/钩子）
 └── adapter/        ← 适配器开发入口（对接外部协议）
 ```
 
@@ -137,6 +135,7 @@ supported = ">=0.1.0,<0.3.0"
 |------|------|------|
 | `id` | 是 | 插件唯一标识符 |
 | `name` | 否 | 显示名称 |
+| `type` | 否 | `plugin`（默认）或 `adapter`；其他历史类型已移除 |
 | `description` | 否 | 插件描述 |
 | `version` | 否 | 插件版本 |
 | `entry` | 是 | 入口点：`模块路径:类名` |
@@ -242,7 +241,7 @@ from plugin.sdk.plugin import (
     Ok, Err, Result, unwrap, unwrap_or,
     # 运行时工具
     Plugins, PluginRouter, PluginConfig, PluginStore,
-    SystemInfo, MemoryClient,
+    SystemInfo,
     # 错误
     SdkError, TransportError,
     # 日志
@@ -256,11 +255,13 @@ from plugin.sdk.plugin import (
 |------|------|------|
 | `self.ctx` | `PluginContext` | 运行时上下文（宿主注入） |
 | `self.plugin_id` | `str` | 插件唯一标识符 |
-| `self.config_dir` | `Path` | `plugin.toml` 所在目录 |
+| `self.plugin_dir` | `Path` | 插件安装目录（代码、Manifest 和静态资源） |
+| `self.config_dir` | `Path` | `self.plugin_dir` 的兼容别名 |
+| `self.storage_dir` | `Path` | 分配给插件的用户存储根目录 |
+| `self.runtime_config_path` | `Path` | 外部运行配置文件路径 |
 | `self.metadata` | `dict` | 来自 `plugin.toml` 的元数据 |
-| `self.bus` | `Bus` | 事件总线（发布/订阅） |
+| `self.bus` | `SdkBusContext` | 宿主状态的 read/watch 门面；没有 publish/emit API |
 | `self.plugins` | `Plugins` | 跨插件调用工具 |
-| `self.memory` | `MemoryClient` | 宿主记忆系统访问 |
 | `self.system_info` | `SystemInfo` | 宿主系统元数据 |
 
 ### 3.3 NekoPluginBase 方法
@@ -277,34 +278,201 @@ self.report_status({
 })
 ```
 
-#### `push_message(**kwargs) -> object`
+<a id="push-message-v2"></a>
+#### `push_message(**kwargs) -> PushMessageResult`
 
-向主系统推送消息：
+`push_message` 是插件 → 主系统的**唯一**消息推送入口。两条独立的轴
+决定下游行为，配合 `parts` 列表承载 OpenAI 风格的多模态内容。完整
+schema 见
+[plugin/sdk/shared/core/push_message_schema.py](sdk/shared/core/push_message_schema.py)。
 
 ```python
-self.push_message(
+ctx.push_message(
+    visibility=[],                  # ["chat"] / ["hud"] / ["chat","hud"] / []
+    ai_behavior="respond",          # "respond" / "read" / "blind"
+    parts=[                         # 有序的内容 parts
+        {"type": "text",  "text": "看这个"},
+        {"type": "image", "data": img_bytes, "mime": "image/png"},
+        # 以下三种当前只在 schema 中占位，AI 注入链路 warn-drop，
+        # 详见下文「当前实现限制」：
+        # {"type": "image", "url": "https://example.com/cat.png"},
+        # {"type": "audio", "data": audio_bytes, "mime": "audio/mpeg"},
+        # {"type": "video", "url":  "https://example.com/clip.mp4"},
+        {"type": "ui_action",
+         "action": "media_play_url",
+         "url": "https://example.com/song.mp3",
+         "media_type": "audio"},
+    ],
     source="my_feature",
-    message_type="text",        # "text" | "url" | "binary" | "binary_url"
-    description="任务完成",
-    priority=5,                 # 0-10 (0=低, 10=紧急)
-    content="结果文本",
+    target_lanlan="灵",             # 可选，路由到指定 session
+    metadata={...},
+    priority=0,                     # 数字越大优先级越高
 )
 ```
 
-#### `register_music_domains(domains: list[str] | str) -> None`
-
-向主系统注册合法的音乐源域名白名单（详见 [3.9 节](#39-音乐播放安全接口-music-ui)）：
+返回值是本地提交结果：
 
 ```python
-self.register_music_domains(["music.my-cdn.com", "https://other-safe-site.org/"])
+result = ctx.push_message(
+    visibility=[],
+    ai_behavior="respond",
+    parts=[{"type": "text", "text": "请回应这条事件"}],
+)
+if not result["submitted"]:
+    # 可以保留本地任务，稍后由插件自己的策略决定是否重试。
+    # 不要把消息正文写入日志。
+    logger.warning("message submission failed: %s", result.get("reason"))
 ```
+
+`submitted=True` 只表示 SDK 已把 payload 交给权威本地提交路径，并接管后续提交
+责任；它不表示宿主已经消费、AI 已生成回复或音频已经播放。
+`submitted=False` 会携带稳定的 `reason`：`backpressure`、`transport_error`
+或 `transport_unavailable`。结果不会暴露内部 transport 名称，也不会回显消息正文
+或异常内容。拒绝结果还会携带兼容旧调用方的 `ok=False`；新代码应以
+`submitted` 为正式判据。调用方可以保留本地状态，但重试和去重仍由具体插件决定。
+
+##### 两条轴的语义
+
+* **`visibility`** — plugin 的 parts 直接渲染给用户的目标列表（**与 AI 无关**）：
+
+  | 值 | 含义 |
+  |---|---|
+  | `"chat"` | parts 在 chat 框里**原文**渲染（plugin 的话直接当 chat 气泡） |
+  | `"hud"`  | parts 在 agent UI / HUD 通知面板显示 |
+  | `[]`     | 用户**不直接**看到 parts；如果 `ai_behavior="respond"`，用户看到的是 AI 的回复 |
+
+  可同时多选（如 `["chat", "hud"]`）。
+
+* **`ai_behavior`** — LLM 怎么处理 parts：
+
+  | 值 | LLM 上下文 | 触发回复 turn | 何时被提及 |
+  |---|---|---|---|
+  | `"respond"`（默认） | ✅ | ✅ 立即起 turn | AI 立刻接茬 |
+  | `"read"`  | ✅ | ❌ 不打断 | 下次用户开口时 AI 自然提及 |
+  | `"blind"` | ❌ | ❌ | AI 看不到 |
+
+##### `parts` part 类型
+
+每个 part 是个 dict，必须有 `type` discriminator：
+
+| `type` | 字段 | 用途 |
+|---|---|---|
+| `text` | `text: str` | 纯文本 |
+| `image` | `data: bytes` + `mime` 或 `url` + `mime` | 图（inline 或远端） |
+| `audio` | 同 image | 音频（schema 占位，**当前 AI 注入链路尚未消费**，会 warn-drop） |
+| `video` | 同 image | 视频（schema 占位，**当前 AI 注入链路尚未消费**，会 warn-drop） |
+| `ui_action` | `action: str` + 各 action 的字段 | 前端 UI 副作用 |
+
+inline `data: bytes` 由 SDK 自动 base64 编码后随 payload 传出。
+
+> **当前实现限制**（v0.9 移除前会逐步补齐）：
+> - `ai_behavior in ("respond","read")` 时只有 **inline `image` parts** 真正进 LLM
+>   上下文（走 `session.stream_image(base64)`）。
+> - `image` 的 `url` 形态会被 main_server warn-drop，避免 event-bus 同步去抓远端
+>   导致整路阻塞。需要 URL 形态时请在 plugin 自己 fetch 后回填 `data` 字段。
+> - `audio` / `video` 当前没有对应的 realtime 注入通道（`stream_audio` 是 PCM 实时
+>   麦克风专用，video 完全没有 API），都会 warn-drop。这两种 type 现阶段只
+>   推荐配合 `ai_behavior="blind"` + `ui_action` 走纯前端展示。
+>
+> **大小限制**：inline part 通过 message_plane 走 ZMQ，整条 payload 上限是
+> `MESSAGE_PLANE_PAYLOAD_MAX_BYTES`（默认 256 KB）。1080p 截图建议先压成
+> JPEG q70 或 256x256 PNG；超过 256KB 的大文件请上传到 BlobStore 再用
+> `parts=[{"type": "image", "url": ...}]` 引用，**注意上一条限制**：当前
+> 只有 inline 形态才进 AI。
+
+##### 常见组合
+
+```python
+# 1. 让 AI 转述（最常用）：plugin 文本 → LLM 上下文 → AI 立即回复
+ctx.push_message(parts=[{"type": "text", "text": "用户给你打赏了 100 块"}])
+
+# 2. 安静通知 AI：下次用户说话时 AI 自然提及
+ctx.push_message(
+    visibility=[],
+    ai_behavior="read",
+    parts=[{"type": "text", "text": "B站直播间又有新弹幕"}],
+)
+
+# 3. 只在 HUD 通知用户，不打扰 AI
+ctx.push_message(
+    visibility=["hud"],
+    ai_behavior="blind",
+    parts=[{"type": "text", "text": "插件 X 已启动"}],
+)
+
+# 4. plugin 直接在 chat 渲染卡片，AI 不知情（取代旧 music_play_url）
+ctx.push_message(
+    visibility=["chat"],
+    ai_behavior="blind",
+    parts=[{
+        "type": "ui_action",
+        "action": "media_play_url",
+        "url": "https://music.example.com/song.mp3",
+        "media_type": "audio",
+        "name": "Test Song",
+        "artist": "Bot",
+    }],
+)
+
+# 5. 文字 + 图同时给 AI
+ctx.push_message(
+    parts=[
+        {"type": "text",  "text": "看这张图"},
+        {"type": "image", "data": img_bytes, "mime": "image/png"},
+    ],
+)
+
+# 6. 注册音乐域名白名单（取代旧 register_music_domains）
+ctx.push_message(
+    ai_behavior="blind",
+    parts=[{
+        "type": "ui_action",
+        "action": "media_allowlist_add",
+        "domains": ["music.my-cdn.com"],
+    }],
+)
+```
+
+##### 已废弃字段（v0.9 移除）
+
+| 旧字段 | 新写法 |
+|---|---|
+| `message_type="proactive_notification"` | 默认行为，去掉即可 |
+| `message_type="music_play_url"` | `parts=[{"type":"ui_action","action":"media_play_url",...}]` + `visibility=["chat"], ai_behavior="blind"` |
+| `message_type="music_allowlist_add"` | `parts=[{"type":"ui_action","action":"media_allowlist_add","domains":[...]}]` + `ai_behavior="blind"` |
+| `content="X"` | `parts=[{"type":"text","text":"X"}]` |
+| `binary_data=bytes, mime` | 按 MIME 选择 `image` / `audio` / `video`，使用 `parts=[{"type":...,"data":bytes,"mime":...}]` |
+| `binary_url=URL, mime` | 按 MIME 选择 `image` / `audio` / `video`，使用 `parts=[{"type":...,"url":URL,"mime":...}]` |
+| `delivery="proactive"` / `reply=True` | 默认即是 `visibility=[], ai_behavior="respond"` |
+| `delivery="passive"` | `visibility=[], ai_behavior="read"` |
+| `delivery="silent"` / `reply=False` | `visibility=["hud"], ai_behavior="blind"` |
+| `description="X"` | `metadata={"description": "X"}` |
+| `unsafe=True` | drop |
+| `fast_mode=True` | drop；v2 使用标准宿主投递路径，旧批处理/背压优化不会保留，高频生产者需重新压测 |
+
+旧字段的有效使用仍可兼容，但会触发 `DeprecationWarning` 提示在 v0.9 移除；
+`unsafe=False`、`fast_mode=False` 与值为 `None` 的旧字段不会触发 warning。
+完整 changelog：[`docs/changelog/`](../docs/changelog/)。
+
+> **`register_music_domains()` SDK helper 已删除**。请直接 push 一条带
+> `ui_action: media_allowlist_add` 的消息（见上面例 6）。
 
 #### `data_path(*parts) -> Path`
 
 获取插件 `data/` 目录下的路径：
 
 ```python
-db_path = self.data_path("cache.db")  # → <plugin_dir>/data/cache.db
+db_path = self.data_path("records.db")
+# → <storage-root>/plugins/<plugin_id>/data/records.db
+```
+
+#### `cache_path(*parts) -> Path`
+
+获取插件可清理缓存目录下的路径：
+
+```python
+preview_path = self.cache_path("preview.png")
+# → <storage-root>/plugins/<plugin_id>/cache/preview.png
 ```
 
 #### `register_dynamic_entry(entry_id, handler, ...) -> bool`
@@ -342,7 +510,7 @@ self.register_static_ui("static")  # 提供 <plugin_dir>/static/index.html
 
 #### `include_router(router, *, prefix) -> None`
 
-挂载 `PluginRouter`（Extension 使用）。
+挂载 `PluginRouter`，用于组织大型或按功能拆分的普通 Plugin。
 
 #### `run_update(**kwargs) -> object` (async)
 
@@ -356,17 +524,139 @@ self.register_static_ui("static")  # 提供 <plugin_dir>/static/index.html
 
 通知宿主任务完成。
 
-#### 回复控制
+#### 回复控制（`finish()` 的 `delivery`）
 
-`finish()` 的 `reply` 参数（默认 `True`）控制是否触发角色说话：
+`finish()` 仍接受 `delivery` 参数控制任务结果如何到达主 AI（三档枚举，默认 `"proactive"`）：
+
+| `delivery` | 是否进 LLM 上下文 | 是否立即起 turn 播报 | 前端 HUD/通知 |
+|---|---|---|---|
+| `"proactive"`（默认） | ✅ | ✅ 立即起 turn | ✅ |
+| `"passive"` | ✅ 写入上下文 | ❌ 不打断；下次用户发言时由 AI 自然提及 | ✅ |
+| `"silent"` | ❌ AI 不知情 | ❌ | ✅（只剩 task_update） |
 
 ```python
-# 正常：角色会播报结果
-return await self.finish(data={"summary": "天气晴朗"}, reply=True)
+# 正常：角色立即播报结果
+return await self.finish(data={"summary": "天气晴朗"})
 
-# 静默：结果会记录但角色不说话
-return await self.finish(data={"summary": "天气晴朗"}, reply=False)
+# 安静通知：进上下文不打断；下次用户开口时 AI 顺嘴提一下
+return await self.finish(data={"summary": "番茄钟到点了"}, delivery="passive")
+
+# 完全静默：AI 不知情；前端只通过 task_update 看到任务终态
+return await self.finish(data={"summary": "..."}, delivery="silent")
 ```
+
+> **`push_message()` 不再用 `delivery`**——改成 `visibility` + `ai_behavior`
+> 两条独立轴（见上面 `push_message(**kwargs) -> PushMessageResult` 节）。旧 `delivery=`
+> / `reply=` 仍能用但会 emit DeprecationWarning，v0.9 移除。
+
+#### "任务汇报"vs"事件回应"：声明结果语义
+
+主 AI 在收到通知时，会被套上一层外层 prompt。**外层 prompt 的措辞分两类**：
+
+| 你调用 | 宿主分类 | AI 收到的外层 prompt 大意 |
+|---|---|---|
+| `await self.finish(...)`（默认） | `task_result` | "来自{你的插件}的任务已完成，请向主人**汇报**..." |
+| 查询/即时回执 entry 声明 `result_kind="event"` | `event` | "来自{你的插件}的**新消息**，请按内容**回应**主人..." |
+| `self.push_message(...)` | `event` | "来自{你的插件}的**新消息**，请按内容**回应**主人..." |
+
+设计原因——"任务汇报"和"事件流"是两种完全不同的语义：
+- 任务汇报：插件被调用后跑完，AI 应该告诉主人"我做了什么、结果怎样"
+- 事件流：插件持续监听外部事件（弹幕、IM 消息、定时器），AI 应该**回应这个事件本身**，
+  而不是叙述成"我刚刚处理了一下…"
+
+旧版本曾经把所有 `ai_behavior="respond"` 的 push 也套上"任务已完成"模板，导致
+弹幕插件让兰兰用"我刚才处理了一下弹幕"这种汇报型口吻回观众——这是 bug，已修复。
+
+查询、状态读取或“已开始”一类即时回执应显式降级为事件语义。可静态声明：
+
+```python
+@plugin_entry(
+    id="service_status",
+    metadata={"result_kind": "event", "expires_in_s": 30},
+)
+```
+
+也可由某次运行结果覆盖静态声明：
+
+```python
+return await self.finish(
+    data={"status": "running"},
+    meta={"agent": {"result_kind": "event", "expires_in_s": 10}},
+)
+```
+
+解析优先级为“运行时 `meta.agent` > entry 静态 `metadata` > 默认
+`task_result`”。`expires_in_s` 只对 `event` 结果生效；过期回执不会再进入主 AI。
+宿主只允许成功的 `user_plugin task_result` 降级为 `event`，不能把
+`proactive_message` 反向伪装成任务完成。
+
+> `delivery` / `ai_behavior` 只控制时机（立即起 turn / 等下次用户开口 / 完全静默），
+> 不再决定外层 prompt 的措辞。两个轴正交，组合 6 种都合理。
+
+#### 写"角色感知文本"：`{MASTER_NAME}` / `{LANLAN_NAME}` 占位符
+
+插件通过 `finish()` 的 `data.summary` / `data.detail`、`push_message()` 的
+`parts[*].text` 等渠道把字符串塞进对话 LLM 上下文（或在 `direct_reply` 时直接进
+TTS / 聊天气泡）。这些字符串里**不要硬编码** `"用户"` / `"user"` / `"master"`
+/ `"主人"` —— 会导致两个问题：
+
+- **口吻别扭**：主 AI 看到"向用户汇报…"会原样照念"向用户继续叙述"，而不是用
+  实际的 `master_name`，听感生硬、出戏。
+- **多角色失真**：每个 `LLMSessionManager` 有自己的 `lanlan_name`；一个插件
+  广播给多个角色时，硬编码会让所有角色用同一份措辞。
+
+##### 占位符契约
+
+在 `summary` / `detail` / `parts[*].text` 里直接写：
+
+| 占位符 | 替换成 |
+|---|---|
+| `{MASTER_NAME}` | 当前会话的 `master_name`（用户起的名字） |
+| `{LANLAN_NAME}` | 当前会话的角色名 |
+
+宿主在 LLM 注入点（`main_logic.core.apply_role_placeholders`）按目标 session 展
+开。**不能在插件侧自己替换**——`push_message` 的 visibility 过滤是宿主端的，
+插件不知道这条消息最终落到哪个 session，也就拿不到正确的 name。
+
+##### 例子
+
+```python
+# ✅ 推荐：让宿主按 session 展开
+await self.finish(data={
+    "summary": "立即基于最新画面向 {MASTER_NAME} 叙述刚才发生的事",
+})
+
+self.push_message(parts=[{
+    "type": "text",
+    "text": "{MASTER_NAME} 刚刚发了一条弹幕：『...』",
+}], ai_behavior="respond")
+
+# ❌ 不推荐：硬编码，口吻泛化 + 多角色失真
+await self.finish(data={"summary": "立即向用户叙述..."})
+self.push_message(parts=[{"type": "text", "text": "主人发了一条弹幕..."}], ...)
+```
+
+##### 实现细节
+
+- **替换语义是 `str.replace`，不是 `str.format`**：`detail` 里嵌 JSON 片段 /
+  代码 / 含 `{` 的用户原文都不会触发 `KeyError`。
+- **空 name 时占位符保持字面量**：宿主拿不到 name（极少见的初始化阶段）时，
+  `{MASTER_NAME}` 留在原文，不会替换成空串造成"向 ... 汇报"这种破句。
+- **拼写固定**：用 **`{MASTER_NAME}` / `{LANLAN_NAME}`**（大写、下划线、单层
+  花括号）。`prompts_chara.py` 里用的也是这套；不要写 `{master_name}` /
+  `{master}` / `{MASTER}`——那些是宿主内部模板的 `.format(...)` 占位符，不跨
+  插件边界。
+
+##### 适用范围
+
+| 渠道 | 是否展开 |
+|---|---|
+| `finish(data={"summary": ..., "detail": ...})` | ✅ |
+| `push_message(parts=[{"type": "text", ...}])` 进 LLM 上下文 | ✅ |
+| `task_result` + `direct_reply=True`（绕过 LLM 直接 TTS） | ✅ |
+| `push_message(visibility=["chat"], ai_behavior="blind")` 直进聊天气泡 | ✅ |
+| `push_message(visibility=["hud"])` HUD toast 文本 | ✅ |
+| 静态描述字段（`plugin.toml` 的 `description`、入口的 `name` 等） | ❌ 不展开（这些是给开发者 / UI 看的，不进对话渠道） |
 
 #### LLM 结果字段过滤
 
@@ -385,6 +675,14 @@ self.register_dynamic_entry(
     llm_result_fields=["summary"],
 )
 ```
+
+#### 旧 `message_type` 的迁移
+
+> ⚠️ **`message_type` 已废弃，v0.9 移除**。新代码请用 `parts` 列表 +
+> `visibility` / `ai_behavior` 描述消息——对照表见上面 push_message
+> 节的「已废弃字段」。如果你需要扩展 push_message 的能力，请直接在
+> `parts` 加新的 `type`，**不要**新增 `message_type` 值。完整迁移清单见
+> [`docs/zh-CN/plugins/migration-v0.9.md`](../docs/zh-CN/plugins/migration-v0.9.md)。
 
 ### 3.4 Result 类型：Ok / Err
 
@@ -444,21 +742,24 @@ result = await self.plugins.require_enabled("dependency_plugin")
 ### 3.6 持久化存储 (PluginStore)
 
 ```python
-from plugin.sdk.plugin import PluginStore
+from plugin.sdk.plugin import Err, unwrap_or
 
-store = PluginStore(self.ctx)
-await store.set("key", {"count": 42})
-value = await store.get("key")  # → {"count": 42}
+saved = await self.store.set("key", {"count": 42})
+if isinstance(saved, Err):
+    return saved
+
+value = unwrap_or(await self.store.get("key"), None)  # → {"count": 42}
 ```
 
 ### 3.7 消息类型
 
-| 类型 | 用途 |
-|------|------|
-| `text` | 纯文本消息 |
-| `url` | URL 链接 |
-| `binary` | 小型二进制数据（直接传输） |
-| `binary_url` | 大文件（通过 URL 引用） |
+`push_message` 没有 `message_type` 字段了——内容形态由 `parts` 各元素的
+`type` 描述（`text` / `image` / `audio` / `video` / `ui_action`），下游
+路由由 `visibility` + `ai_behavior` 决定。详见上面 [3.3 节
+`push_message`](#push-message-v2)。
+
+`message_type=...` 仍可作为旧 API 兼容形参传入，但每次会触发
+`DeprecationWarning`，v0.9 移除。
 
 ### 3.8 优先级
 
@@ -499,24 +800,37 @@ window.addEventListener('music-ui-ready', () => {
 
 #### 3.9.2 后端插件 API (Python SDK)
 
-[新] 对于纯后端插件（例如 AI 自动搜索并播放音乐），可以在插件逻辑中直接调用 SDK 方法。
+后端插件（例如 AI 自动搜索并播放音乐）通过 `push_message` 推一条
+`ui_action: media_allowlist_add` 给前端：
 
-**场景**：AI 插件通过搜素获取了一个 URL 并希望兰兰播放它。
-
-| 方法 | 参数 | 说明 |
-|------|------|------|
-| `register_music_domains(domains)` | `list[str] \| str` | 向前端推送加白请求。支持完整 URL 自动解析 hostname |
-
-**示例代码**：
 ```python
 @plugin_entry(id="play_external")
 def play_external(self, url: str, **_):
     # 先加白域名，确保播放不会被 Music UI 拦截
-    self.register_music_domains(url)
-    
-    # ... 后续播放逻辑 ...
-    return Ok({"status": "domain_registered", "url": url})
+    self.push_message(
+        ai_behavior="blind",
+        parts=[{
+            "type": "ui_action",
+            "action": "media_allowlist_add",
+            "domains": [url],
+        }],
+    )
+
+    # 然后让前端直接开播
+    self.push_message(
+        visibility=["chat"],
+        ai_behavior="blind",
+        parts=[{
+            "type": "ui_action",
+            "action": "media_play_url",
+            "url": url,
+            "media_type": "audio",
+        }],
+    )
+    return Ok({"status": "playing", "url": url})
 ```
+
+> 旧 SDK helper `self.register_music_domains(...)` 已**删除**。
 
 ---
 
@@ -746,18 +1060,36 @@ def heartbeat(self, **_):
 | `ctx.plugin_id` | `str` | 插件标识符 |
 | `ctx.config_path` | `Path` | `plugin.toml` 的路径 |
 | `ctx.logger` | `Logger` | 日志实例 |
-| `ctx.bus` | `Bus` | 事件总线 |
+| `ctx.bus` | `SdkBusContext` | 宿主状态的 read/watch 门面 |
 | `ctx.metadata` | `dict` | 插件元数据 |
 
-### 5.2 事件总线 (Bus)
+### 5.2 Bus 读取与监听
+
+`self.bus` 不是发布/订阅总线，没有 `emit()` 或 `on()`。五个命名空间都可读取；
+只有 `messages`、`events`、`lifecycle` 支持 `watch()`，`conversations` 与
+`memory` 是只读快照。异步入口中先 `await get()`，再组合结构化过滤、排序与限量：
 
 ```python
-# 发布事件
-self.bus.emit("my_event", {"key": "value"})
+events = await self.bus.events.get(plugin_id=self.plugin_id, max_count=50)
+recent = events.filter(priority_min=1).sort(by="timestamp", reverse=True).limit(20)
 
-# 订阅事件（通常在 startup 中）
-self.bus.on("some_event", self._handle_event)
+watcher = recent.watch(self.ctx)
+
+@watcher.subscribe(on="add")  # 仅支持 add / del / change
+def on_added(delta):
+    for event in delta.added:
+        self.logger.info(f"new event: {event.type}")
+
+watcher.start()
 ```
+
+可调用形式 `filter(predicate)`、`where(predicate)` 与 `sort(key=callable)`
+只处理已经物化的本地快照，不能被 `watch()` 重放。监听链必须使用上例中
+可重放的结构化 `filter(field=value, ...)` 与 `sort(by=...)`。
+
+最近记忆记录使用 `await self.bus.memory.get(bucket_id="default", limit=20)`；
+语义检索使用 `await self.ctx.query_memory("default", "用户偏好")`。旧的
+高层 `self.memory` / SDK `MemoryClient` 已删除。
 
 ### 5.3 PluginConfig
 
@@ -923,23 +1255,26 @@ class MonitoredPlugin(NekoPluginBase):
 from typing import Any
 from plugin.sdk.plugin import (
     NekoPluginBase, neko_plugin, plugin_entry,
-    PluginStore, Ok, Err, SdkError,
+    Ok, Err, SdkError,
 )
 
 @neko_plugin
 class NotesPlugin(NekoPluginBase):
-    def __init__(self, ctx: Any):
-        super().__init__(ctx)
-        self.store = PluginStore(ctx)
-
     @plugin_entry(id="save_note")
     async def save_note(self, title: str, content: str, **_):
-        await self.store.set(f"note:{title}", {"title": title, "content": content})
+        saved = await self.store.set(
+            f"note:{title}", {"title": title, "content": content}
+        )
+        if isinstance(saved, Err):
+            return saved
         return Ok({"saved": title})
 
     @plugin_entry(id="get_note")
     async def get_note(self, title: str, **_):
-        note = await self.store.get(f"note:{title}")
+        stored = await self.store.get(f"note:{title}")
+        if isinstance(stored, Err):
+            return stored
+        note = stored.value
         if note is None:
             return Err(SdkError(f"笔记未找到: {title}"))
         return Ok(note)
@@ -947,61 +1282,27 @@ class NotesPlugin(NekoPluginBase):
 
 ---
 
-## 第七章：Extension 扩展开发
+## 第七章：Router 组合
 
-### 7.1 什么是 Extension？
-
-Extension 为现有插件添加路由和钩子，无需修改原插件代码。它运行在宿主插件的进程内（不是独立进程）。
-
-### 7.2 何时使用 Extension？
-
-- 想给现有插件添加新命令
-- 想钩住另一个插件的入口点
-- 想实现插件内的模块化代码组织
-
-### 7.3 创建 Extension
+`PluginRouter` 用于拆分普通 Plugin 内部的入口，不是一种独立插件类型。把 Router 放在所属 Plugin 的源码树中，并在 `NekoPluginBase` 实例上显式挂载：
 
 ```python
-from plugin.sdk.extension import (
-    NekoExtensionBase, extension, extension_entry, extension_hook,
-    Ok, Err,
-)
+from plugin.sdk.plugin import NekoPluginBase, PluginRouter, plugin_entry, Ok
 
-@extension
-class MyExtension(NekoExtensionBase):
-    """为宿主插件添加额外命令"""
 
-    @extension_entry(id="extra_command", description="扩展添加的额外命令")
-    def extra_command(self, param: str = "", **_):
-        return Ok({"extended": True, "param": param})
+class ExtraRouter(PluginRouter):
+    @plugin_entry(id="extra_command", description="额外命令")
+    async def extra_command(self, param: str = "", **_):
+        return Ok({"param": param})
 
-    @extension_hook(target="original_entry", timing="before")
-    def validate(self, *, args, **_):
-        # 在宿主插件的 "original_entry" 之前运行
-        if not args.get("required_field"):
-            return Err("缺少 required_field")
+
+class MyPlugin(NekoPluginBase):
+    def __init__(self, ctx):
+        super().__init__(ctx)
+        self.include_router(ExtraRouter(name="extra"))
 ```
 
-### 7.4 Extension 工作原理
-
-1. 宿主在配置中注册 Extension
-2. 启动时，宿主将 Extension 作为 `PluginRouter` 实例注入
-3. Extension 的入口点在宿主插件的命名空间下可访问
-4. Extension 的钩子可以拦截宿主的入口点
-
-### 7.5 Extension SDK 导出
-
-从 `plugin.sdk.extension` 导入：
-
-- `NekoExtensionBase` — Extension 基类
-- `extension` — 类装饰器
-- `extension_entry` — 定义入口点
-- `extension_hook` — 定义钩子
-- `Ok`, `Err`, `Result` — Result 类型
-- `PluginRouter` — 路由器
-- `PluginConfig` — 配置
-- `CallChain`, `AsyncCallChain` — 调用链追踪
-- 完整的日志和错误处理工具
+原 Extension 包必须将 Router 合并进所属 Plugin，或改造成独立的普通 Plugin。`type = "extension"`、`[plugin.host]` 和 `plugin.sdk.extension` 均已移除，不提供兼容层。
 
 ---
 
@@ -1151,7 +1452,7 @@ import json
 class ConfigurablePlugin(NekoPluginBase):
     def __init__(self, ctx):
         super().__init__(ctx)
-        config_file = self.config_dir / "config.json"
+        config_file = self.storage_dir / "config" / "config.json"
         if config_file.exists():
             self.config = json.loads(config_file.read_text())
         else:
@@ -1244,12 +1545,18 @@ async def on_shutdown(self, **_):
 ### 10.5 使用路径工具
 
 ```python
-# 插件目录（plugin.toml 所在位置）
-config_file = self.config_dir / "config.json"
+# 插件安装目录（代码、Manifest 和静态资源）
+template_path = self.plugin_dir / "static" / "template.json"
+
+# 用户存储目录
+config_file = self.storage_dir / "config" / "config.json"
 
 # 数据目录
-db_path = self.data_path("cache.db")       # → <plugin_dir>/data/cache.db
-logs_dir = self.data_path("logs")          # → <plugin_dir>/data/logs/
+db_path = self.data_path("records.db")     # → <storage-dir>/data/records.db
+logs_dir = self.data_path("logs")          # → <storage-dir>/data/logs/
+
+# 缓存目录
+preview_path = self.cache_path("preview.png")  # → <storage-dir>/cache/preview.png
 ```
 
 ### 10.6 插件发布检查清单
@@ -1269,7 +1576,7 @@ logs_dir = self.data_path("logs")          # → <plugin_dir>/data/logs/
 
 ### Q: 插件崩溃会影响主系统吗？
 
-不会。每个插件运行在独立进程中，崩溃不影响主系统或其他插件。
+Plugin 与 Adapter 的崩溃通常不会影响主系统或其他插件，因为它们独立运行。
 
 ### Q: 如何在插件间传递数据？
 
@@ -1285,15 +1592,14 @@ logs_dir = self.data_path("logs")          # → <plugin_dir>/data/logs/
 2. 使用 `self.report_status()` 报告状态
 3. 检查插件进程的标准输出/错误输出
 
-### Q: Plugin vs Extension vs Adapter 怎么选？
+### Q: Plugin vs Adapter 怎么选？
 
-- **Plugin**：99% 的情况，写独立功能
-- **Extension**：给别人的插件加功能，不改原代码
+- **Plugin**：默认选择，承载普通功能和大型插件 Router
 - **Adapter**：桥接外部协议（MCP、NoneBot 等）
 
 ### Q: `shared` 包是什么？我需要用它吗？
 
-`shared` 是 SDK 的内部实现细节，包含 Plugin/Extension/Adapter 三者共享的底层基础设施。**你不应该直接导入它。** 始终从 `plugin.sdk.plugin`、`plugin.sdk.extension` 或 `plugin.sdk.adapter` 导入。
+`shared` 是 SDK 的内部实现细节。**你不应该直接导入它。** 新代码始终从 `plugin.sdk.plugin` 或 `plugin.sdk.adapter` 导入。
 
 ---
 
@@ -1306,19 +1612,9 @@ logs_dir = self.data_path("logs")          # → <plugin_dir>/data/logs/
 | **基类** | `NekoPluginBase`, `PluginMeta` |
 | **装饰器** | `neko_plugin`, `plugin_entry`, `lifecycle`, `timer_interval`, `message`, `on_event`, `custom_event`, `hook`, `before_entry`, `after_entry`, `around_entry`, `replace_entry`, `plugin` |
 | **Result** | `Ok`, `Err`, `Result`, `unwrap`, `unwrap_or` |
-| **运行时** | `Plugins`, `PluginRouter`, `PluginConfig`, `PluginStore`, `SystemInfo`, `MemoryClient` |
+| **运行时** | `Plugins`, `PluginRouter`, `PluginConfig`, `PluginStore`, `SystemInfo` |
 | **错误** | `SdkError`, `TransportError` |
 | **日志** | `get_plugin_logger` |
-
-### Extension SDK (`plugin.sdk.extension`)
-
-| 类别 | 导出 |
-|------|------|
-| **基类** | `NekoExtensionBase`, `ExtensionMeta` |
-| **装饰器** | `extension`, `extension_entry`, `extension_hook` |
-| **运行时** | `PluginRouter`, `PluginConfig`, `ExtensionRuntime`, `MessagePlaneTransport` |
-| **Result** | `Ok`, `Err`, `Result` + 完整 Result 工具集 |
-| **调用链** | `CallChain`, `AsyncCallChain` + 追踪工具 |
 
 ### Adapter SDK (`plugin.sdk.adapter`)
 

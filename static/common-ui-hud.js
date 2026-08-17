@@ -5,6 +5,80 @@
 
 window.AgentHUD = window.AgentHUD || {};
 
+var PLUGIN_DASHBOARD_REDIRECT_URL = '/api/agent/user_plugin/dashboard';
+const STANDALONE_HUD_POSITION = Object.freeze({
+    top: '0',
+    left: '0',
+    right: 'auto',
+    transform: 'none'
+});
+const AGENT_TASK_HUD_COLLAPSED_KEY = 'agent-task-hud-collapsed-v2';
+const AGENT_TASK_HUD_VISIBLE_KEY = 'neko-agent-taskhud-visible';
+
+function isAgentTaskHudVisiblePreferenceEnabled() {
+    try {
+        return localStorage.getItem(AGENT_TASK_HUD_VISIBLE_KEY) !== 'false';
+    } catch (_) {
+        return true;
+    }
+}
+
+function setAgentTaskHudVisiblePreferenceEnabled(enabled) {
+    try {
+        localStorage.setItem(AGENT_TASK_HUD_VISIBLE_KEY, enabled ? 'true' : 'false');
+    } catch (_) {}
+}
+
+function appendPluginDashboardOpenerOrigin(url) {
+    const target = new URL(url, document.baseURI || window.location.href);
+    if (window.location && window.location.origin) {
+        target.searchParams.set('yui_opener_origin', window.location.origin);
+    }
+    return target.toString();
+}
+
+function getPluginDashboardRedirectUrl() {
+    return appendPluginDashboardOpenerOrigin(PLUGIN_DASHBOARD_REDIRECT_URL);
+}
+
+function appendCacheBuster(url) {
+    var separator = typeof url === 'string' && url.indexOf('?') >= 0 ? '&' : '?';
+    return `${url}${separator}v=${Date.now()}`;
+}
+
+function isStandaloneAgentHudPage() {
+    try {
+        return !!(document.body && document.body.classList.contains('agent-hud-standalone-page'));
+    } catch (_) {
+        return false;
+    }
+}
+
+function isAgentHudSuppressedByGoodbye() {
+    if (isStandaloneAgentHudPage()) return false;
+    try {
+        if (typeof window.isNekoGoodbyeResourceSuspendingOrSuspended === 'function' &&
+            window.isNekoGoodbyeResourceSuspendingOrSuspended()) {
+            return true;
+        }
+        if (typeof window.isNekoGoodbyeModeActive === 'function' && window.isNekoGoodbyeModeActive()) {
+            return true;
+        }
+    } catch (_) { /* ignore */ }
+    return false;
+}
+
+function setAgentHudDraggingState(active) {
+    try {
+        if (document.body) {
+            document.body.classList.toggle('neko-agent-hud-dragging', !!active);
+        }
+        window.dispatchEvent(new CustomEvent('neko-agent-hud-drag-state', {
+            detail: { dragging: !!active }
+        }));
+    } catch (_) {}
+}
+
 /**
  * 精简 AI 生成的冗长任务描述为用户友好的短文本
  * 例: "设置一个15分钟后的一次性提醒，内容为'起来活动'" → "15分钟后 起来活动"
@@ -29,6 +103,68 @@ window.AgentHUD._shortenDesc = function (desc) {
     return s.slice(0, 50) || desc.slice(0, 50);
 };
 
+window.AgentHUD._getTaskRawDesc = function (task) {
+    const params = task && task.params ? task.params : {};
+    return params.description || params.instruction || '';
+};
+
+// New cards and differential updates share this path so the visible text and
+// tooltip source cannot drift apart while task_update events reuse DOM nodes.
+window.AgentHUD._syncTaskDescriptionRow = function (card, task, isRunning) {
+    if (!card) return;
+    const rawDesc = this._getTaskRawDesc(task);
+    const descText = rawDesc ? window.AgentHUD._shortenDesc(rawDesc) : '';
+    let descRow = card.querySelector('.task-card-desc');
+
+    if (!descText) {
+        if (descRow) {
+            if (window.NekoTooltip && typeof window.NekoTooltip.destroyFor === 'function') {
+                window.NekoTooltip.destroyFor(descRow);
+            }
+            descRow.removeAttribute('title');
+            descRow.remove();
+        }
+        return;
+    }
+
+    if (!descRow) {
+        descRow = document.createElement('div');
+        descRow.className = 'task-card-desc';
+        Object.assign(descRow.style, {
+            color: 'var(--neko-popup-text-sub, #888)',
+            fontSize: '11px',
+            lineHeight: '1.3',
+            marginTop: '3px',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap'
+        });
+        const progressRow = card.querySelector('.task-progress-row');
+        if (progressRow) {
+            card.insertBefore(descRow, progressRow);
+        } else {
+            card.appendChild(descRow);
+        }
+    }
+
+    if (descRow.dataset.rawDesc !== rawDesc) {
+        descRow.textContent = descText;
+        descRow.dataset.rawDesc = rawDesc;
+        // Bind only the description text, not the whole card, so cancel and drag
+        // targets keep their existing pointer behavior.
+        if (window.NekoTooltip && typeof window.NekoTooltip.attach === 'function') {
+            window.NekoTooltip.attach(descRow, { text: rawDesc });
+        } else {
+            descRow.title = rawDesc;
+        }
+    }
+
+    const expectedMargin = isRunning ? '3px' : '0';
+    if (descRow.style.marginBottom !== expectedMargin) {
+        descRow.style.marginBottom = expectedMargin;
+    }
+};
+
 // 缓存当前显示器边界信息（多屏幕支持）
 let cachedDisplayHUD = {
     x: 0,
@@ -36,6 +172,63 @@ let cachedDisplayHUD = {
     width: window.innerWidth,
     height: window.innerHeight
 };
+
+function getAgentHudViewportBounds() {
+    return {
+        left: 0,
+        top: 0,
+        width: Math.max(1, Math.round(Number(window.innerWidth) || 1)),
+        height: Math.max(1, Math.round(Number(window.innerHeight) || 1))
+    };
+}
+
+function clampAgentHudViewportPosition(left, top, width, height) {
+    const viewport = getAgentHudViewportBounds();
+    const safeWidth = Math.max(1, Number(width) || 1);
+    const safeHeight = Math.max(1, Number(height) || 1);
+    const maxLeft = Math.max(viewport.left, viewport.left + viewport.width - safeWidth);
+    const maxTop = Math.max(viewport.top, viewport.top + viewport.height - safeHeight);
+    return {
+        left: Math.max(viewport.left, Math.min(Number(left) || 0, maxLeft)),
+        top: Math.max(viewport.top, Math.min(Number(top) || 0, maxTop))
+    };
+}
+
+function getAgentHudPixelCoordinate(value, fallback) {
+    const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+    const numeric = parseFloat(normalized);
+    if (normalized.endsWith('px') && Number.isFinite(numeric)) {
+        return numeric;
+    }
+    const safeFallback = Number(fallback);
+    return Number.isFinite(safeFallback) ? safeFallback : 0;
+}
+
+function clampAgentHudElementToViewport(hud, options = {}) {
+    if (!hud) return null;
+    const rect = hud.getBoundingClientRect();
+    const currentLeft = getAgentHudPixelCoordinate(hud.style.left, rect.left);
+    const currentTop = getAgentHudPixelCoordinate(hud.style.top, rect.top);
+    const clamped = clampAgentHudViewportPosition(currentLeft, currentTop, rect.width, rect.height);
+    hud.style.left = clamped.left + 'px';
+    hud.style.top = clamped.top + 'px';
+    hud.style.right = 'auto';
+    hud.style.transform = 'none';
+
+    if (options.persist) {
+        try {
+            localStorage.setItem('agent-task-hud-position', JSON.stringify({
+                left: hud.style.left,
+                top: hud.style.top,
+                right: hud.style.right,
+                transform: hud.style.transform
+            }));
+        } catch (error) {
+            console.warn('Failed to save position to localStorage:', error);
+        }
+    }
+    return clamped;
+}
 
 // 更新显示器边界信息
 async function updateDisplayBounds(centerX, centerY) {
@@ -109,10 +302,13 @@ try {
 // 创建Agent弹出框内容
 window.AgentHUD._createAgentPopupContent = function (popup) {
     popup.style.gap = '0';
+    const avatarPrefix = this && typeof this._avatarPrefix === 'string' && this._avatarPrefix
+        ? this._avatarPrefix
+        : 'live2d';
 
     // 添加状态显示栏 - Fluent Design
     const statusDiv = document.createElement('div');
-    statusDiv.id = 'live2d-agent-status';
+    statusDiv.id = `${avatarPrefix}-agent-status`;
     Object.assign(statusDiv.style, {
         fontSize: '12px',
         color: 'var(--neko-popup-accent, #2a7bc4)',
@@ -128,50 +324,64 @@ window.AgentHUD._createAgentPopupContent = function (popup) {
     statusDiv.setAttribute('data-i18n', 'settings.toggles.checking');
     popup.appendChild(statusDiv);
 
-    // 【状态机严格控制】所有 agent 开关默认禁用，title显示查询中
-    // 只有状态机检测到可用性后才逐个恢复交互
+    // 【状态机严格控制】Agent 能力开关默认禁用，title显示查询中
+    // 只有状态机检测到可用性后才逐个恢复交互；悬浮窗显示偏好不依赖后端状态。
     const agentToggles = [
         {
             id: 'agent-master',
             label: window.t ? window.t('settings.toggles.agentMaster') : 'Agent总开关',
             labelKey: 'settings.toggles.agentMaster',
             initialDisabled: true,
-            initialTitle: window.t ? window.t('settings.toggles.checking') : '查询中...'
+            initialTitle: window.t ? window.t('settings.toggles.checking') : '查询中...',
+            controlStyle: 'slider'
+        },
+        {
+            id: 'agent-taskhud',
+            label: window.t ? window.t('settings.toggles.showTaskHud') : '显示悬浮窗',
+            labelKey: 'settings.toggles.showTaskHud',
+            initialDisabled: false,
+            controlStyle: 'slider',
+            separatorAfter: true
         },
         {
             id: 'agent-keyboard',
             label: window.t ? window.t('settings.toggles.keyboardControl') : '键鼠控制',
             labelKey: 'settings.toggles.keyboardControl',
             initialDisabled: true,
-            initialTitle: window.t ? window.t('settings.toggles.checking') : '查询中...'
+            initialTitle: window.t ? window.t('settings.toggles.checking') : '查询中...',
+            controlStyle: 'slider'
         },
         {
             id: 'agent-browser',
             label: window.t ? window.t('settings.toggles.browserUse') : 'Browser Control',
             labelKey: 'settings.toggles.browserUse',
             initialDisabled: true,
-            initialTitle: window.t ? window.t('settings.toggles.checking') : '查询中...'
+            initialTitle: window.t ? window.t('settings.toggles.checking') : '查询中...',
+            controlStyle: 'slider'
         },
         {
             id: 'agent-openfang',
             label: window.t ? window.t('settings.toggles.openfang') : '专属桌面',
             labelKey: 'settings.toggles.openfang',
             initialDisabled: true,
-            initialTitle: window.t ? window.t('settings.toggles.checking') : '查询中...'
+            initialTitle: window.t ? window.t('settings.toggles.checking') : '查询中...',
+            controlStyle: 'slider'
         },
         {
             id: 'agent-user-plugin',
             label: window.t ? window.t('settings.toggles.userPlugin') : '用户插件',
             labelKey: 'settings.toggles.userPlugin',
             initialDisabled: true,
-            initialTitle: window.t ? window.t('settings.toggles.checking') : '查询中...'
+            initialTitle: window.t ? window.t('settings.toggles.checking') : '查询中...',
+            controlStyle: 'slider'
         },
         {
             id: 'agent-openclaw',
             label: window.t ? window.t('settings.toggles.openclawConnect') : 'OpenClaw',
             labelKey: 'settings.toggles.openclawConnect',
             initialDisabled: true,
-            initialTitle: window.t ? window.t('settings.toggles.checking') : '查询中...'
+            initialTitle: window.t ? window.t('settings.toggles.checking') : '查询中...',
+            controlStyle: 'slider'
         }
     ];
 
@@ -179,9 +389,45 @@ window.AgentHUD._createAgentPopupContent = function (popup) {
         const toggleItem = this._createToggleItem(toggle, popup);
         popup.appendChild(toggleItem);
 
+        if (toggle.id === 'agent-taskhud') {
+            const taskHudCheckbox = toggleItem.querySelector(`#${avatarPrefix}-agent-taskhud`);
+            if (taskHudCheckbox) {
+                taskHudCheckbox.checked = isAgentTaskHudVisiblePreferenceEnabled();
+                if (typeof taskHudCheckbox._updateStyle === 'function') {
+                    taskHudCheckbox._updateStyle();
+                }
+                taskHudCheckbox.addEventListener('change', (event) => {
+                    setAgentTaskHudVisiblePreferenceEnabled(taskHudCheckbox.checked);
+                    if (typeof window.checkAndToggleTaskHUD === 'function') {
+                        window.checkAndToggleTaskHUD(event);
+                    } else if (!taskHudCheckbox.checked && typeof this.hideAgentTaskHUD === 'function') {
+                        this.hideAgentTaskHUD();
+                    }
+                });
+            }
+        }
+
+        if (toggle.separatorAfter) {
+            const separator = document.createElement('div');
+            separator.className = `${avatarPrefix}-settings-separator`;
+            separator.setAttribute('aria-hidden', 'true');
+            popup.appendChild(separator);
+        }
+
         // 侧边快捷入口（用户插件管理面板 / OpenClaw 接入教程）
         if ((toggle.id === 'agent-user-plugin' || toggle.id === 'agent-openclaw') && typeof this._createSidePanelContainer === 'function') {
+            document.querySelectorAll(`[data-neko-sidepanel-type="${toggle.id}-actions"]`).forEach((element) => {
+                if (element && typeof element.remove === 'function') {
+                    element.remove();
+                }
+            });
+            const existingSidePanelById = document.getElementById(`${toggle.id}-actions`);
+            if (existingSidePanelById && typeof existingSidePanelById.remove === 'function') {
+                existingSidePanelById.remove();
+            }
             const sidePanel = this._createSidePanelContainer();
+            sidePanel.id = `${toggle.id}-actions`;
+            sidePanel.setAttribute('data-neko-sidepanel-type', `${toggle.id}-actions`);
             sidePanel.style.flexDirection = 'column';
             sidePanel.style.alignItems = 'stretch';
             sidePanel.style.gap = '4px';
@@ -192,13 +438,16 @@ window.AgentHUD._createAgentPopupContent = function (popup) {
             const configBtn = document.createElement('div');
             const actionConfig = toggle.id === 'agent-user-plugin'
                 ? {
+                    actionId: 'management-panel',
                     labelKey: 'settings.toggles.pluginManagementPanel',
                     labelFallback: '管理面板',
                     icon: '⚙',
-                    url: '/api/agent/user_plugin/dashboard',
-                    windowName: 'neko_plugin_dashboard'
+                    url: getPluginDashboardRedirectUrl,
+                    windowName: 'neko_plugin_dashboard',
+                    forceReloadOnReuse: true
                 }
                 : {
+                    actionId: 'openclaw-guide',
                     labelKey: 'settings.toggles.openclawGuide',
                     labelFallback: 'OpenClaw 接入教程',
                     icon: '📘',
@@ -206,6 +455,13 @@ window.AgentHUD._createAgentPopupContent = function (popup) {
                     windowName: 'neko_openclaw_guide',
                     forceReloadOnReuse: true
                 };
+            const existingActionButton = document.getElementById(`neko-sidepanel-action-${toggle.id}-${actionConfig.actionId}`);
+            if (existingActionButton && typeof existingActionButton.remove === 'function') {
+                existingActionButton.remove();
+            }
+            configBtn.id = `neko-sidepanel-action-${toggle.id}-${actionConfig.actionId}`;
+            configBtn.setAttribute('data-neko-sidepanel-action', actionConfig.actionId);
+            configBtn.setAttribute('data-neko-sidepanel-toggle', toggle.id);
             Object.assign(configBtn.style, {
                 display: 'flex',
                 alignItems: 'center',
@@ -222,9 +478,17 @@ window.AgentHUD._createAgentPopupContent = function (popup) {
             configIcon.textContent = actionConfig.icon;
             configIcon.style.fontSize = '13px';
             const configLabel = document.createElement('span');
-            configLabel.textContent = window.t ? window.t(actionConfig.labelKey) : actionConfig.labelFallback;
             configLabel.setAttribute('data-i18n', actionConfig.labelKey);
             configLabel.style.userSelect = 'none';
+            configBtn.setAttribute('data-i18n-title', actionConfig.labelKey);
+            const updateConfigI18n = () => {
+                const translated = window.t ? window.t(actionConfig.labelKey) : actionConfig.labelFallback;
+                configLabel.textContent = translated;
+                configBtn.title = translated;
+                configBtn.setAttribute('aria-label', translated);
+            };
+            configLabel._updateLabelText = updateConfigI18n;
+            updateConfigI18n();
             const configArrow = document.createElement('span');
             configArrow.textContent = '↗';
             configArrow.style.marginLeft = 'auto';
@@ -251,21 +515,41 @@ window.AgentHUD._createAgentPopupContent = function (popup) {
                 const left = Math.max(0, Math.floor((screen.width - width) / 2));
                 const top = Math.max(0, Math.floor((screen.height - height) / 2));
                 const features = `width=${width},height=${height},left=${left},top=${top},menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes`;
-                const targetUrl = actionConfig.forceReloadOnReuse
-                    ? `${actionConfig.url}?v=${Date.now()}`
+                const rawUrl = typeof actionConfig.url === 'function'
+                    ? actionConfig.url()
                     : actionConfig.url;
+                const absoluteUrl = new URL(rawUrl, document.baseURI || window.location.href).toString();
+                const targetUrl = actionConfig.forceReloadOnReuse
+                    ? appendCacheBuster(absoluteUrl)
+                    : absoluteUrl;
                 const existingWindow = window._openedWindows && window._openedWindows[actionConfig.windowName];
+                let openedWindow = null;
                 if (actionConfig.forceReloadOnReuse && existingWindow && !existingWindow.closed) {
                     try {
                         existingWindow.location.replace(targetUrl);
                     } catch (_) {
                         existingWindow.location.href = targetUrl;
                     }
+                    if (typeof window.requestOpenedWindowRestore === 'function') {
+                        window.requestOpenedWindowRestore(existingWindow);
+                    }
                     existingWindow.focus();
+                    openedWindow = existingWindow;
                 } else if (typeof window.openOrFocusWindow === 'function') {
-                    window.openOrFocusWindow(targetUrl, actionConfig.windowName, features);
+                    openedWindow = window.openOrFocusWindow(targetUrl, actionConfig.windowName, features, {
+                        navigateOnReuse: !!actionConfig.forceReloadOnReuse
+                    });
                 } else {
-                    window.open(targetUrl, actionConfig.windowName, features);
+                    openedWindow = window.open(targetUrl, actionConfig.windowName, features);
+                }
+                if (openedWindow) {
+                    if (!window._openedWindows) {
+                        window._openedWindows = {};
+                    }
+                    window._openedWindows[actionConfig.windowName] = openedWindow;
+                    try {
+                        openedWindow.focus();
+                    } catch (_) {}
                 }
                 setTimeout(() => { isOpening = false; }, 500);
             });
@@ -290,17 +574,19 @@ window.AgentHUD.createAgentTaskHUD = function () {
         this._cleanupDragging = null;
     }
 
-    // 初始化显示器边界缓存
-    updateDisplayBounds();
-
     const hud = document.createElement('div');
     hud.id = 'agent-task-hud';
 
     // 获取保存的位置或使用默认位置
-    const savedPos = localStorage.getItem('agent-task-hud-position');
+    const standaloneAgentHud = isStandaloneAgentHudPage();
+    const savedPos = standaloneAgentHud ? null : localStorage.getItem('agent-task-hud-position');
     let position = { top: '50%', right: '20px', transform: 'translateY(-50%)' };
 
-    if (savedPos) {
+    if (standaloneAgentHud) {
+        position = STANDALONE_HUD_POSITION;
+    }
+
+    if (!standaloneAgentHud && savedPos) {
         try {
             const parsed = JSON.parse(savedPos);
             position = {
@@ -316,8 +602,9 @@ window.AgentHUD.createAgentTaskHUD = function () {
 
     Object.assign(hud.style, {
         position: 'fixed',
-        width: '320px',
-        maxHeight: '60vh',
+        width: standaloneAgentHud ? '100%' : '320px',
+        maxHeight: standaloneAgentHud ? '100vh' : '60vh',
+        height: standaloneAgentHud ? '100%' : '',
         background: 'var(--neko-popup-bg, rgba(255, 255, 255, 0.65))',
         backdropFilter: 'saturate(180%) blur(20px)',
         WebkitBackdropFilter: 'saturate(180%) blur(20px)',
@@ -335,7 +622,7 @@ window.AgentHUD.createAgentTaskHUD = function () {
         pointerEvents: 'auto',
         overflowY: 'auto',
         transition: 'opacity 0.4s cubic-bezier(0.16, 1, 0.3, 1), transform 0.4s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.3s ease, width 0.4s cubic-bezier(0.16, 1, 0.3, 1), padding 0.4s ease, max-height 0.4s ease',
-        cursor: 'move',
+        cursor: standaloneAgentHud ? 'default' : 'move',
         userSelect: 'none',
         willChange: 'transform, width',
         contain: 'layout style paint'
@@ -349,6 +636,7 @@ window.AgentHUD.createAgentTaskHUD = function () {
 
     // HUD 标题栏
     const header = document.createElement('div');
+    header.id = 'agent-task-hud-header';
     Object.assign(header.style, {
         display: 'flex',
         alignItems: 'center',
@@ -447,11 +735,22 @@ window.AgentHUD.createAgentTaskHUD = function () {
         try {
             cancelBtn.style.opacity = '0.5';
             cancelBtn.style.pointerEvents = 'none';
-            await fetch('/api/agent/admin/control', {
+            const r = await fetch('/api/agent/admin/control', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ action: 'end_all' })
             });
+            // 2xx → end_all ran; 504 → the proxy timed out AFTER forwarding,
+            // so the tool server keeps executing end_all to completion.
+            // Either way the backend registry ends up cleared — apply the
+            // terminal state locally in case its task_update events never
+            // arrive (stuck dispatch). Other failures (500 connect error,
+            // 501 remote block) mean the request never landed: don't lie.
+            if (r.ok || r.status === 504) {
+                if (window.AgentHUD._markTasksCancelledLocally) {
+                    window.AgentHUD._markTasksCancelledLocally();
+                }
+            }
         } catch (err) {
             console.error('[AgentHUD] Cancel all tasks failed:', err);
         } finally {
@@ -482,7 +781,6 @@ window.AgentHUD.createAgentTaskHUD = function () {
     });
 
     // 整体折叠逻辑 (key v2: reset stale collapsed state)
-    const hudCollapsedKey = 'agent-task-hud-collapsed-v2';
     const applyHudCollapsed = (collapsed) => {
         if (!collapsed && hud.style.display !== 'none') {
             // Check edge collision for smooth unfolding direction towards the left
@@ -519,7 +817,7 @@ window.AgentHUD.createAgentTaskHUD = function () {
             taskList.style.opacity = '0';
             minimizeBtn.style.transform = 'rotate(-90deg)';
         } else {
-            hud.style.width = '320px';
+            hud.style.width = standaloneAgentHud ? '100%' : '320px';
             hud.style.gap = '12px'; 
             
             header.style.padding = '12px 16px';
@@ -540,15 +838,21 @@ window.AgentHUD.createAgentTaskHUD = function () {
 
     // Default: expanded
     let hudCollapsed = false;
-    try { hudCollapsed = localStorage.getItem(hudCollapsedKey) === 'true'; } catch (_) { }
+    try { hudCollapsed = localStorage.getItem(AGENT_TASK_HUD_COLLAPSED_KEY) === 'true'; } catch (_) { }
     applyHudCollapsed(hudCollapsed);
 
     minimizeBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         hudCollapsed = !hudCollapsed;
         applyHudCollapsed(hudCollapsed);
-        try { localStorage.setItem(hudCollapsedKey, String(hudCollapsed)); } catch (_) { }
+        try { localStorage.setItem(AGENT_TASK_HUD_COLLAPSED_KEY, String(hudCollapsed)); } catch (_) { }
     });
+
+    hud._setAgentTaskHudCollapsed = (collapsed) => {
+        hudCollapsed = collapsed === true;
+        applyHudCollapsed(hudCollapsed);
+        try { localStorage.setItem(AGENT_TASK_HUD_COLLAPSED_KEY, String(hudCollapsed)); } catch (_) { }
+    };
 
     // 空状态提示
     const emptyState = document.createElement('div');
@@ -590,8 +894,13 @@ window.AgentHUD._setupCollapseFunctionality = function (emptyState, collapseButt
 };
 
 // 显示任务 HUD
-window.AgentHUD.showAgentTaskHUD = function () {
+window.AgentHUD.showAgentTaskHUD = function (options = {}) {
+    const ignoreVisibilityPreference = options.ignoreVisibilityPreference === true;
     console.log('[AgentHUD][TimeoutTrace] showAgentTaskHUD called. Current timeout ID:', this._hideTimeout);
+    if (isAgentHudSuppressedByGoodbye() || (!ignoreVisibilityPreference && !isAgentTaskHudVisiblePreferenceEnabled())) {
+        this.hideAgentTaskHUD();
+        return;
+    }
     
     // 清除任何正在进行的隐藏动画定时器，防止闪现后立刻消失
     if (this._hideTimeout) {
@@ -606,8 +915,14 @@ window.AgentHUD.showAgentTaskHUD = function () {
     }
     hud.style.display = 'flex';
     hud.style.opacity = '1';
-    const savedPos = localStorage.getItem('agent-task-hud-position');
-    if (savedPos) {
+    const standaloneAgentHud = isStandaloneAgentHudPage();
+    const savedPos = standaloneAgentHud ? null : localStorage.getItem('agent-task-hud-position');
+    if (standaloneAgentHud) {
+        hud.style.left = STANDALONE_HUD_POSITION.left;
+        hud.style.top = STANDALONE_HUD_POSITION.top;
+        hud.style.right = STANDALONE_HUD_POSITION.right;
+        hud.style.transform = STANDALONE_HUD_POSITION.transform;
+    } else if (savedPos) {
         try {
             const parsed = JSON.parse(savedPos);
             if (parsed.top) hud.style.top = parsed.top;
@@ -617,17 +932,34 @@ window.AgentHUD.showAgentTaskHUD = function () {
         } catch (e) {
             hud.style.transform = 'translateY(-50%) translateX(0)';
         }
+        clampAgentHudElementToViewport(hud, { persist: true });
     } else {
         hud.style.transform = 'translateY(-50%) translateX(0)';
     }
 };
 
 // 隐藏任务 HUD
+window.AgentHUD.expandAgentTaskHUD = function () {
+    const hud = document.getElementById('agent-task-hud');
+    if (!hud) return false;
+    if (typeof hud._setAgentTaskHudCollapsed === 'function') {
+        hud._setAgentTaskHudCollapsed(false);
+        return true;
+    }
+    try { localStorage.setItem(AGENT_TASK_HUD_COLLAPSED_KEY, 'false'); } catch (_) {}
+    return false;
+};
+
 window.AgentHUD.hideAgentTaskHUD = function () {
     const hud = document.getElementById('agent-task-hud');
     if (!hud) {
         // HUD 不存在时无需创建再隐藏，直接返回
         return;
+    }
+
+    // The tooltip lives on document.body, so hide it explicitly when the HUD fades.
+    if (window.NekoTooltip && typeof window.NekoTooltip.hide === 'function') {
+        window.NekoTooltip.hide();
     }
 
     // 已经处于隐藏状态时跳过重复操作
@@ -637,8 +969,14 @@ window.AgentHUD.hideAgentTaskHUD = function () {
 
     console.log('[AgentHUD] hideAgentTaskHUD: starting fade out');
     hud.style.opacity = '0';
-    const savedPos = localStorage.getItem('agent-task-hud-position');
-    if (!savedPos) {
+    const standaloneAgentHud = isStandaloneAgentHudPage();
+    const savedPos = standaloneAgentHud ? null : localStorage.getItem('agent-task-hud-position');
+    if (standaloneAgentHud) {
+        hud.style.left = STANDALONE_HUD_POSITION.left;
+        hud.style.top = STANDALONE_HUD_POSITION.top;
+        hud.style.right = STANDALONE_HUD_POSITION.right;
+        hud.style.transform = STANDALONE_HUD_POSITION.transform;
+    } else if (!savedPos) {
         hud.style.transform = 'translateY(-50%) translateX(20px)';
     }
 
@@ -657,6 +995,14 @@ window.AgentHUD.hideAgentTaskHUD = function () {
 window.AgentHUD.updateAgentTaskHUD = function (tasksData) {
     // Cache latest snapshot so deferred re-render won't use stale closure data.
     this._latestTasksData = tasksData;
+    if (isAgentHudSuppressedByGoodbye()) {
+        if (this._updateRafId) {
+            cancelAnimationFrame(this._updateRafId);
+            this._updateRafId = null;
+        }
+        this.hideAgentTaskHUD();
+        return;
+    }
 
     // RAF throttle: coalesce rapid-fire WebSocket updates into a single frame
     if (this._updateRafId) return;
@@ -666,8 +1012,74 @@ window.AgentHUD.updateAgentTaskHUD = function (tasksData) {
     });
 };
 
+// Local fallback: mark tasks cancelled in the shared task map and re-render.
+// The HUD is purely event-driven; when the backend is wedged (the very
+// situation the user is cancelling out of) its task_update(cancelled) events
+// may never arrive, leaving cards stuck on "running" forever. The cancel
+// click handlers below call this after reaching the server so the UI always
+// converges. Backend events for the same tasks merge idempotently in
+// app-websocket.js.
+window.AgentHUD._markTasksCancelledLocally = function (taskIds, status) {
+    const map = window._agentTaskMap;
+    if (!map || typeof map.forEach !== 'function' || map.size === 0) return;
+    if (!window._agentTaskRemoveTimers) window._agentTaskRemoveTimers = new Map();
+    const ids = Array.isArray(taskIds) ? new Set(taskIds) : null;
+    // Optional status override: when the backend reports the task already
+    // reached a different terminal state, mirror it instead of "cancelled".
+    const terminalStatus = status || 'cancelled';
+    const now = Date.now();
+    let changed = false;
+    map.forEach((t, id) => {
+        if (!t || (ids && !ids.has(id))) return;
+        if (t.status !== 'running' && t.status !== 'queued') return;
+        map.set(id, Object.assign({}, t, { status: terminalStatus, terminal_at: now }));
+        changed = true;
+        // Schedule the same 10s map removal as the websocket event path —
+        // otherwise the entry outlives the HUD's 30s terminal cache and a
+        // later full-map refresh would re-show it as a "new" terminal task.
+        // If the backend's own cancelled event arrives later, app-websocket
+        // clears this timer and installs its own (idempotent handoff).
+        if (window._agentTaskRemoveTimers.has(id)) {
+            clearTimeout(window._agentTaskRemoveTimers.get(id));
+        }
+        window._agentTaskRemoveTimers.set(id, setTimeout(() => {
+            window._agentTaskRemoveTimers.delete(id);
+            const current = window._agentTaskMap && window._agentTaskMap.get(id);
+            if (!current || current.status !== terminalStatus) return;
+            window._agentTaskMap.delete(id);
+            const remaining = Array.from(window._agentTaskMap.values());
+            window.AgentHUD.updateAgentTaskHUD({
+                success: true,
+                tasks: remaining,
+                total_count: remaining.length,
+                running_count: remaining.filter(t2 => t2.status === 'running').length,
+                queued_count: remaining.filter(t2 => t2.status === 'queued').length,
+                completed_count: remaining.filter(t2 => t2.status === 'completed').length,
+                failed_count: remaining.filter(t2 => t2.status === 'failed').length,
+                timestamp: new Date().toISOString()
+            });
+        }, 10000));
+    });
+    if (!changed) return;
+    const tasks = Array.from(map.values());
+    this.updateAgentTaskHUD({
+        success: true,
+        tasks: tasks,
+        total_count: tasks.length,
+        running_count: tasks.filter(t => t.status === 'running').length,
+        queued_count: tasks.filter(t => t.status === 'queued').length,
+        completed_count: tasks.filter(t => t.status === 'completed').length,
+        failed_count: tasks.filter(t => t.status === 'failed').length,
+        timestamp: new Date().toISOString()
+    });
+};
+
 // Internal: actual HUD update logic (called via RAF throttle)
 window.AgentHUD._doUpdateAgentTaskHUD = function () {
+    if (isAgentHudSuppressedByGoodbye()) {
+        this.hideAgentTaskHUD();
+        return;
+    }
     const tasksData = this._latestTasksData;
     if (!tasksData) return;
 
@@ -799,6 +1211,10 @@ window.AgentHUD._doUpdateAgentTaskHUD = function () {
         if (tid && activeIds.has(tid)) {
             existingById.set(tid, card);
         } else {
+            const descRow = card.querySelector('.task-card-desc');
+            if (descRow && window.NekoTooltip && typeof window.NekoTooltip.destroyFor === 'function') {
+                window.NekoTooltip.destroyFor(descRow);
+            }
             card.remove(); // remove cards no longer active
         }
     });
@@ -897,12 +1313,18 @@ window.AgentHUD._updateTaskCard = function (card, task) {
         if (cardCancelBtn.style.display !== cancelDisplay) cardCancelBtn.style.display = cancelDisplay;
     }
 
+    this._syncTaskDescriptionRow(card, task, isRunning);
+
     // Handle progress row: add if now running but missing, remove if no longer running
     const progressRow = card.querySelector('.task-progress-row');
     if (isRunning && !progressRow) {
         // Status just changed to running — rebuild the card cleanly
         const newCard = this._createTaskCard(task);
         const parent = card.parentNode;
+        const oldDescRow = card.querySelector('.task-card-desc');
+        if (oldDescRow && window.NekoTooltip && typeof window.NekoTooltip.destroyFor === 'function') {
+            window.NekoTooltip.destroyFor(oldDescRow);
+        }
         if (parent) parent.replaceChild(newCard, card);
         return newCard;
     } else if (!isRunning && progressRow) {
@@ -1068,6 +1490,7 @@ window.AgentHUD._createTaskCard = function (task) {
     typeLabel.style.overflow = 'hidden';
     typeLabel.style.textOverflow = 'ellipsis';
     typeLabel.style.minWidth = '0';
+    typeLabel.title = typeName;
 
     // 使用 textContent 防止 XSS（避免 plugin_name 中的 HTML 被解析）
     const iconSpan = document.createElement('span');
@@ -1118,18 +1541,51 @@ window.AgentHUD._createTaskCard = function (task) {
         flexShrink: '0',
         marginLeft: '6px'
     });
-    taskCancelBtn.title = window.t ? window.t('agent.taskHud.cancelAll') : '终止任务';
+    taskCancelBtn.title = window.t ? window.t('agent.taskHud.cancelTask') : '终止任务';
     taskCancelBtn.addEventListener('click', async (e) => {
         e.stopPropagation();
         taskCancelBtn.style.opacity = '0.4';
         taskCancelBtn.style.pointerEvents = 'none';
         try {
-            await fetch(`/api/agent/tasks/${encodeURIComponent(task.id)}/cancel`, {
+            const r = await fetch(`/api/agent/tasks/${encodeURIComponent(task.id)}/cancel`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' }
             });
+            // 2xx → the backend handled the cancel (marking locally is an
+            // idempotent fallback for when its event can't arrive);
+            // 404 → the backend no longer tracks this task, the card is an
+            // orphan (e.g. left behind by an earlier end_all) — clear it;
+            // 504 → proxy timed out AFTER forwarding, the cancel did land.
+            // Anything else (502 connect error, 501 remote block) means the
+            // request never reached the tool server — keep the card and
+            // re-enable the button for retry.
+            if (r.ok || r.status === 404 || r.status === 504) {
+                // "task is not active" (200 + success:false) means the task
+                // hit a different terminal state right before the click —
+                // mirror that status instead of faking "cancelled".
+                let realStatus = null;
+                if (r.ok) {
+                    try {
+                        const body = await r.json();
+                        if (body && body.success === false
+                            && ['completed', 'failed', 'cancelled'].indexOf(body.status) !== -1) {
+                            realStatus = body.status;
+                        }
+                    } catch (_) { /* empty or non-JSON body */ }
+                }
+                if (window.AgentHUD._markTasksCancelledLocally) {
+                    window.AgentHUD._markTasksCancelledLocally([task.id], realStatus || undefined);
+                }
+            } else {
+                taskCancelBtn.style.opacity = '1';
+                taskCancelBtn.style.pointerEvents = 'auto';
+            }
         } catch (err) {
             console.error('[AgentHUD] Cancel task failed:', err);
+            // Network-level failure: the request never reached the server.
+            // Re-enable the button so the user can retry.
+            taskCancelBtn.style.opacity = '1';
+            taskCancelBtn.style.pointerEvents = 'auto';
         }
     });
 
@@ -1137,25 +1593,7 @@ window.AgentHUD._createTaskCard = function (task) {
     header.appendChild(taskCancelBtn);
     card.appendChild(header);
 
-    // === 描述行：显示任务具体内容（如"15分钟后 起来活动"） ===
-    const rawDesc = params.description || params.instruction || '';
-    const descText = rawDesc ? window.AgentHUD._shortenDesc(rawDesc) : '';
-    if (descText) {
-        const descRow = document.createElement('div');
-        descRow.textContent = descText;
-        if (rawDesc !== descText) descRow.title = rawDesc; // hover 显示完整内容
-        Object.assign(descRow.style, {
-            color: 'var(--neko-popup-text-sub, #888)',
-            fontSize: '11px',
-            lineHeight: '1.3',
-            marginTop: '3px',
-            marginBottom: isRunning ? '3px' : '0',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap'
-        });
-        card.appendChild(descRow);
-    }
+    this._syncTaskDescriptionRow(card, task, isRunning);
 
     // === 第二行：倒计时 + 进度条（仅运行中任务） ===
     if (isRunning) {
@@ -1241,9 +1679,30 @@ window.AgentHUD._createTaskCard = function (task) {
 
 // 设置HUD全局拖拽功能
 window.AgentHUD._setupDragging = function (hud) {
+    if (isStandaloneAgentHudPage()) {
+        hud.addEventListener('dragstart', (e) => e.preventDefault());
+        this._cleanupDragging = () => {};
+        return;
+    }
+
     let isDragging = false;
     let dragOffsetX = 0;
     let dragOffsetY = 0;
+
+    const resetDragVisualState = () => {
+        hud.style.cursor = 'move';
+        hud.style.boxShadow = 'var(--neko-popup-shadow, 0 2px 4px rgba(0,0,0,0.04), 0 8px 16px rgba(0,0,0,0.08), 0 16px 32px rgba(0,0,0,0.04))';
+        hud.style.opacity = '1';
+        hud.style.transition = 'opacity 0.3s ease, transform 0.3s ease, box-shadow 0.2s ease, width 0.3s ease, padding 0.3s ease, max-height 0.3s ease';
+    };
+
+    const cancelDragState = () => {
+        if (!isDragging && !touchDragging) return;
+        isDragging = false;
+        touchDragging = false;
+        setAgentHudDraggingState(false);
+        resetDragVisualState();
+    };
 
     // 高性能拖拽函数
     const performDrag = (clientX, clientY) => {
@@ -1280,7 +1739,13 @@ window.AgentHUD._setupDragging = function (hud) {
 
         if (isInteractive) return;
 
+        // Body-level tooltips are outside the HUD tree, so close them before moving the HUD.
+        if (window.NekoTooltip && typeof window.NekoTooltip.hide === 'function') {
+            window.NekoTooltip.hide();
+        }
+
         isDragging = true;
+        setAgentHudDraggingState(true);
 
         // 视觉反馈
         hud.style.cursor = 'grabbing';
@@ -1313,50 +1778,14 @@ window.AgentHUD._setupDragging = function (hud) {
         if (!isDragging) return;
 
         isDragging = false;
+        setAgentHudDraggingState(false);
 
         // 恢复视觉状态
-        hud.style.cursor = 'move';
-        hud.style.boxShadow = 'var(--neko-popup-shadow, 0 2px 4px rgba(0,0,0,0.04), 0 8px 16px rgba(0,0,0,0.08), 0 16px 32px rgba(0,0,0,0.04))';
-        hud.style.opacity = '1';
-        hud.style.transition = 'opacity 0.3s ease, transform 0.3s ease, box-shadow 0.2s ease, width 0.3s ease, padding 0.3s ease, max-height 0.3s ease';
+        resetDragVisualState();
 
-        // 最终位置校准（多屏幕支持）
+        // DOM HUD 使用 viewport 坐标；不要混用 Electron screen 坐标。
         requestAnimationFrame(() => {
-            const rect = hud.getBoundingClientRect();
-
-            // 使用缓存的屏幕边界进行限制
-            if (!cachedDisplayHUD) {
-                console.warn('cachedDisplayHUD not initialized, skipping bounds check');
-                return;
-            }
-            const displayLeft = cachedDisplayHUD.x;
-            const displayTop = cachedDisplayHUD.y;
-            const displayRight = cachedDisplayHUD.x + cachedDisplayHUD.width;
-            const displayBottom = cachedDisplayHUD.y + cachedDisplayHUD.height;
-
-            // 确保位置在当前屏幕内
-            let finalLeft = parseFloat(hud.style.left) || 0;
-            let finalTop = parseFloat(hud.style.top) || 0;
-
-            finalLeft = Math.max(displayLeft, Math.min(finalLeft, displayRight - rect.width));
-            finalTop = Math.max(displayTop, Math.min(finalTop, displayBottom - rect.height));
-
-            hud.style.left = finalLeft + 'px';
-            hud.style.top = finalTop + 'px';
-
-            // 保存位置到localStorage
-            const position = {
-                left: hud.style.left,
-                top: hud.style.top,
-                right: hud.style.right,
-                transform: hud.style.transform
-            };
-
-            try {
-                localStorage.setItem('agent-task-hud-position', JSON.stringify(position));
-            } catch (error) {
-                console.warn('Failed to save position to localStorage:', error);
-            }
+            clampAgentHudElementToViewport(hud, { persist: true });
         });
 
         e.preventDefault();
@@ -1382,8 +1811,14 @@ window.AgentHUD._setupDragging = function (hud) {
 
         if (isInteractive) return;
 
+        // Body-level tooltips are outside the HUD tree, so close them before moving the HUD.
+        if (window.NekoTooltip && typeof window.NekoTooltip.hide === 'function') {
+            window.NekoTooltip.hide();
+        }
+
         touchDragging = true;
         isDragging = true;  // 让performDrag函数能正常工作
+        setAgentHudDraggingState(true);
 
         // 视觉反馈
         hud.style.boxShadow = '0 12px 48px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.2)';
@@ -1415,49 +1850,14 @@ window.AgentHUD._setupDragging = function (hud) {
 
         touchDragging = false;
         isDragging = false;  // 确保performDrag函数停止工作
+        setAgentHudDraggingState(false);
 
         // 恢复视觉状态
-        hud.style.boxShadow = 'var(--neko-popup-shadow, 0 2px 4px rgba(0,0,0,0.04), 0 8px 16px rgba(0,0,0,0.08), 0 16px 32px rgba(0,0,0,0.04))';
-        hud.style.opacity = '1';
-        hud.style.transition = 'opacity 0.3s ease, transform 0.3s ease, box-shadow 0.2s ease, width 0.3s ease, padding 0.3s ease, max-height 0.3s ease';
+        resetDragVisualState();
 
-        // 最终位置校准（多屏幕支持）
+        // DOM HUD 使用 viewport 坐标；不要混用 Electron screen 坐标。
         requestAnimationFrame(() => {
-            const rect = hud.getBoundingClientRect();
-
-            // 使用缓存的屏幕边界进行限制
-            if (!cachedDisplayHUD) {
-                console.warn('cachedDisplayHUD not initialized, skipping bounds check');
-                return;
-            }
-            const displayLeft = cachedDisplayHUD.x;
-            const displayTop = cachedDisplayHUD.y;
-            const displayRight = cachedDisplayHUD.x + cachedDisplayHUD.width;
-            const displayBottom = cachedDisplayHUD.y + cachedDisplayHUD.height;
-
-            // 确保位置在当前屏幕内
-            let finalLeft = parseFloat(hud.style.left) || 0;
-            let finalTop = parseFloat(hud.style.top) || 0;
-
-            finalLeft = Math.max(displayLeft, Math.min(finalLeft, displayRight - rect.width));
-            finalTop = Math.max(displayTop, Math.min(finalTop, displayBottom - rect.height));
-
-            hud.style.left = finalLeft + 'px';
-            hud.style.top = finalTop + 'px';
-
-            // 保存位置到localStorage
-            const position = {
-                left: hud.style.left,
-                top: hud.style.top,
-                right: hud.style.right,
-                transform: hud.style.transform
-            };
-
-            try {
-                localStorage.setItem('agent-task-hud-position', JSON.stringify(position));
-            } catch (error) {
-                console.warn('Failed to save position to localStorage:', error);
-            }
+            clampAgentHudElementToViewport(hud, { persist: true });
         });
 
         e.preventDefault();
@@ -1467,56 +1867,21 @@ window.AgentHUD._setupDragging = function (hud) {
     hud.addEventListener('touchstart', handleTouchStart, { passive: false });
     document.addEventListener('touchmove', handleTouchMove, { passive: false });
     document.addEventListener('touchend', handleTouchEnd, { passive: false });
+    document.addEventListener('touchcancel', cancelDragState, { passive: true });
+    window.addEventListener('blur', cancelDragState);
+    window.addEventListener('pointercancel', cancelDragState, true);
 
     // 窗口大小变化时重新校准位置（多屏幕支持）
-    const handleResize = async () => {
+    const handleResize = () => {
         if (isDragging || touchDragging) return;
-
-        // 更新屏幕信息
-        const rect = hud.getBoundingClientRect();
-        const centerX = rect.left + rect.width / 2;
-        const centerY = rect.top + rect.height / 2;
-        await updateDisplayBounds(centerX, centerY);
 
         requestAnimationFrame(() => {
             const rect = hud.getBoundingClientRect();
+            const viewport = getAgentHudViewportBounds();
 
-            // 使用缓存的屏幕边界进行限制
-            if (!cachedDisplayHUD) {
-                console.warn('cachedDisplayHUD not initialized, skipping bounds check');
-                return;
-            }
-            const displayLeft = cachedDisplayHUD.x;
-            const displayTop = cachedDisplayHUD.y;
-            const displayRight = cachedDisplayHUD.x + cachedDisplayHUD.width;
-            const displayBottom = cachedDisplayHUD.y + cachedDisplayHUD.height;
-
-            // 如果HUD超出当前屏幕，调整到可见位置
-            if (rect.left < displayLeft || rect.top < displayTop ||
-                rect.right > displayRight || rect.bottom > displayBottom) {
-
-                let newLeft = parseFloat(hud.style.left) || 0;
-                let newTop = parseFloat(hud.style.top) || 0;
-
-                newLeft = Math.max(displayLeft, Math.min(newLeft, displayRight - rect.width));
-                newTop = Math.max(displayTop, Math.min(newTop, displayBottom - rect.height));
-
-                hud.style.left = newLeft + 'px';
-                hud.style.top = newTop + 'px';
-
-                // 更新保存的位置
-                const position = {
-                    left: hud.style.left,
-                    top: hud.style.top,
-                    right: hud.style.right,
-                    transform: hud.style.transform
-                };
-
-                try {
-                    localStorage.setItem('agent-task-hud-position', JSON.stringify(position));
-                } catch (error) {
-                    console.warn('Failed to save position to localStorage:', error);
-                }
+            if (rect.left < viewport.left || rect.top < viewport.top ||
+                rect.right > viewport.left + viewport.width || rect.bottom > viewport.top + viewport.height) {
+                clampAgentHudElementToViewport(hud, { persist: true });
             }
         });
     };
@@ -1525,12 +1890,16 @@ window.AgentHUD._setupDragging = function (hud) {
 
     // 清理函数
     this._cleanupDragging = () => {
+        setAgentHudDraggingState(false);
         hud.removeEventListener('mousedown', handleMouseDown);
         document.removeEventListener('mousemove', handleMouseMove);
         document.removeEventListener('mouseup', handleMouseUp);
         hud.removeEventListener('touchstart', handleTouchStart);
         document.removeEventListener('touchmove', handleTouchMove);
         document.removeEventListener('touchend', handleTouchEnd);
+        document.removeEventListener('touchcancel', cancelDragState);
+        window.removeEventListener('blur', cancelDragState);
+        window.removeEventListener('pointercancel', cancelDragState, true);
         window.removeEventListener('resize', handleResize);
     };
 };
@@ -1546,25 +1915,6 @@ window.AgentHUD._setupDragging = function (hud) {
             0% { transform: translateX(-100%); }
             50% { transform: translateX(200%); }
             100% { transform: translateX(-100%); }
-        }
-        
-        /* 请她回来按钮呼吸特效 */
-        @keyframes returnButtonBreathing {
-            0%, 100% {
-                box-shadow: 0 0 8px rgba(68, 183, 254, 0.6), 0 2px 4px rgba(0, 0, 0, 0.04), 0 8px 16px rgba(0, 0, 0, 0.08);
-            }
-            50% {
-                box-shadow: 0 0 18px rgba(68, 183, 254, 1), 0 2px 4px rgba(0, 0, 0, 0.04), 0 8px 16px rgba(0, 0, 0, 0.08);
-            }
-        }
-        
-        #live2d-btn-return {
-            animation: returnButtonBreathing 2s ease-in-out infinite;
-            will-change: box-shadow;
-        }
-        
-        #live2d-btn-return:hover {
-            animation: none;
         }
         
         #agent-task-hud::-webkit-scrollbar {
@@ -1702,3 +2052,76 @@ window.AgentHUD._setupDragging = function (hud) {
     `;
     document.head.appendChild(style);
 })();
+
+// ===== i18n 就绪 / 语言切换后重译任务 HUD 外壳 =====
+// HUD 外壳文案（标题 / 统计 / 折叠·终止按钮 title / 空态文本）由 createAgentTaskHUD
+// 用 window.t 直接写入且没有 data-i18n 属性，因此 i18n 的 updatePageTexts() 不会重译它们。
+// 当 HUD 在 i18n 初始化完成前就抢先构建时（典型场景：启动时后端恢复了上次 NekoClaw 会话的
+// 任务，agenthud 页面拉到 active_tasks 后立即渲染 HUD），这些外壳文案会停留在初始兜底态，
+// 表现为「i18n 文字加载异常」。这里监听 localechange（i18n 初始化完成及语言切换时派发），
+// 补一次外壳重译，并用缓存快照刷新任务卡片状态/类型文案。
+window.AgentHUD.refreshHudI18n = function () {
+    if (typeof window.t !== 'function') return;
+    // 仅当 i18n 真正解析出翻译（而非降级返回 key）时才重译，避免把兜底文案覆盖成 key。
+    const titleText = window.t('agent.taskHud.title');
+    if (!titleText || titleText === 'agent.taskHud.title') return;
+
+    const title = document.getElementById('agent-task-hud-title');
+    if (title) {
+        // 用 DOM 节点重建（图标 span + 文本节点），避免 innerHTML 拼接触发静态扫描告警；
+        // titleText 是受信任的 i18n 文案，此处仅为规避 innerHTML 用法。
+        title.textContent = '';
+        const icon = document.createElement('span');
+        icon.textContent = '⚡';
+        icon.style.color = 'var(--neko-popup-accent, #2a7bc4)';
+        icon.style.marginRight = '8px';
+        title.appendChild(icon);
+        title.appendChild(document.createTextNode(titleText));
+    }
+    const stats = document.getElementById('agent-task-hud-stats');
+    if (stats) {
+        const labelled = stats.querySelectorAll('span[title]');
+        if (labelled[0]) labelled[0].title = window.t('agent.taskHud.running');
+        if (labelled[1]) labelled[1].title = window.t('agent.taskHud.queued');
+    }
+    const minimizeBtn = document.getElementById('agent-task-hud-minimize');
+    if (minimizeBtn) minimizeBtn.title = window.t('agent.taskHud.minimize');
+    const cancelBtn = document.getElementById('agent-task-hud-cancel');
+    if (cancelBtn) cancelBtn.title = window.t('agent.taskHud.cancelAll');
+    const emptyState = document.getElementById('agent-task-empty');
+    if (emptyState && emptyState.firstElementChild) {
+        emptyState.firstElementChild.textContent = window.t('agent.taskHud.noTasks');
+    }
+
+    // 用缓存的任务快照重渲染卡片，刷新状态 / 类型 / 终止按钮等文案。
+    // 仅在 HUD 已存在且当前可见时执行：updateAgentTaskHUD 在 HUD 缺失时会创建、
+    // 在有活动任务且隐藏时会自动显示，纯 i18n 重译不应触发这些副作用。
+    const hud = document.getElementById('agent-task-hud');
+    const hudVisible = !!(hud && hud.style.display !== 'none' && hud.style.opacity !== '0');
+    if (hudVisible && this._latestTasksData && typeof this.updateAgentTaskHUD === 'function') {
+        // 卡片走差分更新：_updateTaskCard 仅在状态变化时改状态徽标，且从不更新类型标签 /
+        // 卡片终止按钮 title。语言切换而任务状态不变时（例如运行中的 computer_use 任务）
+        // 卡片文案会停留旧语言。差分门控是每次 WS 更新的热路径，不宜改动；因此在这条低频的
+        // 重译路径里显式清空已有卡片，再走 updateAgentTaskHUD（保留其 RAF 节流，与常规渲染
+        // 管线一致）用当前语言重建，完整覆盖状态 / 类型 / 终止按钮等本地化字段。
+        const taskList = document.getElementById('agent-task-list');
+        if (taskList) {
+            taskList.querySelectorAll('.task-card').forEach((card) => {
+                const descRow = card.querySelector('.task-card-desc');
+                if (descRow && window.NekoTooltip && typeof window.NekoTooltip.destroyFor === 'function') {
+                    try { window.NekoTooltip.destroyFor(descRow); } catch (_) { /* ignore */ }
+                }
+                card.remove();
+            });
+        }
+        try { this.updateAgentTaskHUD(this._latestTasksData); } catch (_) { /* ignore */ }
+    }
+};
+
+window.addEventListener('localechange', function () {
+    try {
+        if (window.AgentHUD && typeof window.AgentHUD.refreshHudI18n === 'function') {
+            window.AgentHUD.refreshHudI18n();
+        }
+    } catch (_) { /* ignore */ }
+});

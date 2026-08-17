@@ -4,7 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, MutableMapping, Protocol, TypeAlias
+from typing import (
+    Any,
+    Callable,
+    Literal,
+    Mapping,
+    MutableMapping,
+    Protocol,
+    TypeAlias,
+    TypedDict,
+)
 
 
 JsonScalar: TypeAlias = str | int | float | bool | None
@@ -13,6 +22,34 @@ JsonObject: TypeAlias = dict[str, JsonValue]
 Metadata: TypeAlias = Mapping[str, JsonValue]
 InputSchema: TypeAlias = Mapping[str, JsonValue]
 EntryHandler: TypeAlias = Callable[..., object]
+
+
+PushMessageFailureReason: TypeAlias = Literal[
+    "backpressure",
+    "transport_error",
+    "transport_unavailable",
+]
+
+
+class PushMessageSubmitted(TypedDict):
+    """The SDK accepted responsibility for a local message submission."""
+
+    submitted: Literal[True]
+
+
+class PushMessageRejected(TypedDict):
+    """The SDK synchronously rejected a local message submission."""
+
+    ok: Literal[False]
+    submitted: Literal[False]
+    reason: PushMessageFailureReason
+
+
+# Immediate local submission result. ``submitted=True`` only means that the
+# SDK's authoritative local submission path accepted responsibility for the
+# payload; it does not acknowledge host consumption, model generation, or
+# playback.
+PushMessageResult: TypeAlias = PushMessageSubmitted | PushMessageRejected
 
 
 class LoggerLike(Protocol):
@@ -98,6 +135,10 @@ class PluginContextProtocol(Protocol):
 
     async def get_own_effective_config(self, profile_name: str | None = None, timeout: float = 5.0) -> object: ...
 
+    async def update_own_config(self, updates: JsonObject, timeout: float = 10.0) -> object: ...
+
+    async def replace_own_config(self, config: JsonObject, timeout: float = 10.0) -> object: ...
+
     async def upsert_own_profile_config(
         self,
         profile_name: str,
@@ -147,6 +188,7 @@ class PluginContextProtocol(Protocol):
         description: str | None = None,
         label: str | None = None,
         metadata: dict[str, object] | None = None,
+        delivery: str | bool | None = None,
         reply: bool | None = None,
         timeout: float = 5.0,
     ) -> object: ...
@@ -155,7 +197,8 @@ class PluginContextProtocol(Protocol):
         self,
         *,
         data: object = None,
-        reply: bool = True,
+        delivery: str | bool | None = None,
+        reply: bool | None = None,
         message: str = "",
         trace_id: str | None = None,
         meta: dict[str, object] | None = None,
@@ -164,18 +207,28 @@ class PluginContextProtocol(Protocol):
     def push_message(
         self,
         *,
-        source: str,
-        message_type: str,
-        description: str = "",
+        # v2 schema:
+        visibility: list[str] | None = None,
+        ai_behavior: str | None = None,
+        parts: list[dict[str, object]] | None = None,
+        # common:
+        source: str = "",
+        target_lanlan: str | None = None,
+        metadata: dict[str, object] | None = None,
         priority: int = 0,
+        coalesce_key: str | None = None,
+        # legacy (deprecated; translated by host adapter):
+        message_type: str | None = None,
+        description: str | None = None,
         content: str | None = None,
         binary_data: bytes | None = None,
         binary_url: str | None = None,
-        metadata: dict[str, object] | None = None,
+        mime: str | None = None,
         unsafe: bool = False,
         fast_mode: bool = False,
-        target_lanlan: str | None = None,
-    ) -> object: ...
+        delivery: str | bool | None = None,
+        reply: bool | None = None,
+    ) -> PushMessageResult: ...
 
     def update_status(self, status: dict[str, object]) -> None: ...
 
@@ -211,5 +264,9 @@ __all__ = [
     "MutableStateProtocol",
     "PluginContextProtocol",
     "PluginRef",
+    "PushMessageFailureReason",
+    "PushMessageRejected",
+    "PushMessageResult",
+    "PushMessageSubmitted",
     "RouterProtocol",
 ]

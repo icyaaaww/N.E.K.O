@@ -15,27 +15,26 @@
             checkOnce: true
         },
 
-        // 2. 茶歇时刻 - 5分钟
+        // 2-4. 计时成就：由 Steam Progress Stat PLAY_TIME_SECONDS 绑定阈值自动解锁
+        // Steamworks 后台需将 ACH_TIME_* 绑定到该 Stat（阈值分别为 300 / 3600 / 360000 秒）
         ACH_TIME_5MIN: {
             name: 'ACH_TIME_5MIN',
             description: '茶歇时刻',
-            steamStat: 'PLAY_TIME_SECONDS',
+            steamProgressStat: 'PLAY_TIME_SECONDS',
             threshold: 300  // 5分钟 = 300秒
         },
 
-        // 3. 渐入佳境 - 1小时
         ACH_TIME_1HR: {
             name: 'ACH_TIME_1HR',
             description: '渐入佳境',
-            steamStat: 'PLAY_TIME_SECONDS',
+            steamProgressStat: 'PLAY_TIME_SECONDS',
             threshold: 3600  // 1小时 = 3600秒
         },
 
-        // 4. 朝夕相伴 - 100小时
         ACH_TIME_100HR: {
             name: 'ACH_TIME_100HR',
             description: '朝夕相伴',
-            steamStat: 'PLAY_TIME_SECONDS',
+            steamProgressStat: 'PLAY_TIME_SECONDS',
             threshold: 360000  // 100小时 = 360000秒
         },
 
@@ -73,6 +72,18 @@
     const STORAGE_KEY = 'neko_achievement_counters';
     const UNLOCKED_KEY = 'neko_unlocked_achievements';
 
+    // Pet + React Chat 都会加载本脚本；时长 Progress Stat 只能由一个窗口上报。
+    function shouldOwnPlaytimeTracking() {
+        if (window.__NEKO_STANDALONE_CHAT__ === true) {
+            return false;
+        }
+        const path = String(window.location.pathname || '');
+        if (window.__NEKO_MULTI_WINDOW__ === true && /^\/chat(?:_full)?(?:\/|$)/.test(path)) {
+            return false;
+        }
+        return true;
+    }
+
     // 成就管理器类
     class AchievementManager {
         constructor() {
@@ -81,8 +92,10 @@
             this.sessionStartTime = Date.now();
             this.pendingAchievements = new Set(); // 防竞态：追踪正在解锁的成就
 
-            // 启动时长追踪（用于 Steam 统计）
-            this.startPlayTimeTracking();
+            // 仅主窗口/Pet 上报 Progress Stat，避免 Pet+Chat 双窗口把时长翻倍
+            if (shouldOwnPlaytimeTracking()) {
+                this.startPlayTimeTracking();
+            }
 
         }
 
@@ -137,6 +150,14 @@
             return this.unlockedAchievements.includes(achievementName);
         }
 
+        markUnlockedLocally(achievementName) {
+            if (this.isUnlocked(achievementName)) {
+                return;
+            }
+            this.unlockedAchievements.push(achievementName);
+            this.saveUnlockedAchievements();
+        }
+
         // 解锁成就
         async unlockAchievement(achievementName) {
             // 检查成就是否存在
@@ -164,22 +185,39 @@
                 console.log(`尝试解锁成就: ${achievementName} - ${ACHIEVEMENTS[achievementName].description}`);
 
                 // 调用Steam API
+                const achHeaders = { 'Content-Type': 'application/json' };
+                const sec = window.nekoLocalMutationSecurity;
+                if (sec && typeof sec.getMutationHeaders === 'function') {
+                    try { Object.assign(achHeaders, await sec.getMutationHeaders()); } catch (_) { }
+                }
                 const response = await fetch(`/api/steam/set-achievement-status/${achievementName}`, {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    }
+                    headers: achHeaders
                 });
 
                 if (response.ok) {
-                    console.log(`✓ 成就解锁成功: ${achievementName}`);
+                    const payload = await response.json().catch(() => ({}));
+                    const alreadyUnlocked = payload && payload.alreadyUnlocked === true;
+                    const newlyUnlocked = payload && payload.newlyUnlocked === true;
+                    const processed = newlyUnlocked || alreadyUnlocked || (payload && payload.success === true);
 
-                    // 记录到本地
-                    this.unlockedAchievements.push(achievementName);
-                    this.saveUnlockedAchievements();
+                    if (!processed) {
+                        console.error(`✗ 成就解锁响应异常: ${achievementName}`, payload);
+                        return false;
+                    }
 
-                    // 显示通知（如果有通知系统）
-                    this.showAchievementNotification(ACHIEVEMENTS[achievementName]);
+                    // 无论 Steam 返回"刚解锁"还是"早已解锁"，本地都要补齐缓存；
+                    // 但只有刚解锁才弹提示，避免清缓存/跨窗口时重复祝贺。
+                    this.markUnlockedLocally(achievementName);
+
+                    if (newlyUnlocked) {
+                        console.log(`✓ 成就解锁成功: ${achievementName}`);
+                        this.showAchievementNotification(ACHIEVEMENTS[achievementName]);
+                    } else if (alreadyUnlocked) {
+                        console.log(`成就已在 Steam 解锁，已同步本地缓存: ${achievementName}`);
+                    } else {
+                        console.log(`✓ 成就处理完成: ${achievementName}`);
+                    }
 
                     return true;
                 } else {
@@ -243,67 +281,122 @@
         }
 
 
-        // 启动游戏时长追踪（用于 Steam 统计 PLAY_TIME_SECONDS）
+        // 本地累加会话时长，定期 SetStat(PLAY_TIME_SECONDS)+StoreStats；
+        // 计时成就由 Steam 按 Progress Stat 绑定阈值自动解锁，前端不主动 SetAchievement。
         startPlayTimeTracking() {
-            // 使用递归 setTimeout 避免重叠调用
-            let prevTs = Date.now(); // 记录上次更新的时间戳
+            // 约每 60 秒上报一次（官方常见节奏：定期/存档点/退出时同步）
+            const REPORT_INTERVAL_MS = 60000;
+            let prevTs = Date.now();
+            let reporting = false;
+            let activeController = null;
+            let forceFlushInFlight = false;
 
-            const updatePlayTime = async () => {
+            const flushPlayTime = async ({ force = false } = {}) => {
+                // visibilitychange(hidden) + pagehide often fire together; only one
+                // keepalive unload flush should run for the same elapsed window.
+                if (force && forceFlushInFlight) return;
+
+                // Unload flush must not be dropped by the in-flight sentinel:
+                // abort the regular request (no keepalive) and re-send with keepalive.
+                if (reporting) {
+                    if (!force) return;
+                    // A force flush is already in flight (no AbortController) — do not
+                    // start a second keepalive with the same elapsedSeconds.
+                    if (!activeController) return;
+                    try { activeController.abort(); } catch (_) { }
+                    activeController = null;
+                }
                 const now = Date.now();
-                // 计算实际经过的秒数（毫秒转秒，至少1秒）
-                // 限制单次最多发送3600秒（1小时），防止累积过多
-                const elapsedSeconds = Math.min(3600, Math.max(1, Math.floor((now - prevTs) / 1000)));
+                const elapsedSeconds = Math.min(
+                    3600,
+                    Math.max(0, Math.floor((now - prevTs) / 1000))
+                );
+                if (!force && elapsedSeconds < 1) {
+                    return;
+                }
+                if (elapsedSeconds < 1) {
+                    prevTs = now;
+                    return;
+                }
 
+                reporting = true;
+                if (force) forceFlushInFlight = true;
+                const controller = force ? null : new AbortController();
+                if (controller) activeController = controller;
                 try {
-                    // 调用后端 API 更新 Steam 统计，发送实际经过的秒数
-                    const response = await fetch('/api/steam/update-playtime', {
+                    const playtimeHeaders = { 'Content-Type': 'application/json' };
+                    const sec = window.nekoLocalMutationSecurity;
+                    if (sec && typeof sec.getMutationHeaders === 'function') {
+                        try { Object.assign(playtimeHeaders, await sec.getMutationHeaders()); } catch (_) { }
+                    }
+                    const fetchOpts = {
                         method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify({
-                            seconds: elapsedSeconds
-                        })
-                    });
+                        headers: playtimeHeaders,
+                        // pagehide / visibility hidden 时页面可能正在卸载，keepalive 保证请求能发完
+                        keepalive: !!force,
+                        body: JSON.stringify({ seconds: elapsedSeconds })
+                    };
+                    if (controller) fetchOpts.signal = controller.signal;
+                    const response = await fetch('/api/steam/update-playtime', fetchOpts);
 
                     if (response.ok) {
-                        const data = await response.json();
-                        // 只有在成功更新后才更新时间戳，避免时间丢失
                         prevTs = now;
-                        // 检查时间相关成就
-                        await this.checkPlayTimeAchievements(data.totalPlayTime);
+                        const data = await response.json().catch(() => ({}));
+                        this.syncProgressStatAchievements(data);
                     } else if (response.status === 503) {
-                        // Steam 未初始化，静默失败（不显示错误）
-                        console.debug('Steam 未初始化，跳过时长更新');
-                        // Steam 未初始化时也更新时间戳，避免累积过多时间
+                        // Steam 未初始化：丢弃这段间隔，避免离线堆积后一次灌入
+                        console.debug('Steam 未初始化，跳过时长进度上报');
                         prevTs = now;
                     }
-                    // 如果响应不是 ok 且不是 503，不更新时间戳，下次会重试
+                    // 其他错误保留 prevTs，下次重试这段时间
                 } catch (error) {
-                    // 网络错误或其他问题，不更新时间戳，下次会重试发送这段时间
-                    console.debug('更新游戏时长失败:', error.message);
+                    if (error && error.name === 'AbortError') {
+                        // Superseded by a force/keepalive flush; keep prevTs for that retry.
+                        return;
+                    }
+                    console.debug('更新游戏时长进度失败:', error.message);
                 } finally {
-                    // 无论成功或失败，都在10秒后继续下一次更新
-                    setTimeout(updatePlayTime, 10000);
+                    if (activeController === controller) activeController = null;
+                    if (force) forceFlushInFlight = false;
+                    reporting = false;
                 }
             };
 
-            // 立即启动第一次更新，不等待10秒
-            updatePlayTime();
+            const scheduleNext = () => {
+                setTimeout(async () => {
+                    await flushPlayTime();
+                    scheduleNext();
+                }, REPORT_INTERVAL_MS);
+            };
+
+            // 页面隐藏/退出时尽量冲刷一次，贴近官方“退出时同步”
+            const flushOnLeave = () => {
+                void flushPlayTime({ force: true });
+            };
+            document.addEventListener('visibilitychange', () => {
+                if (document.visibilityState === 'hidden') {
+                    flushOnLeave();
+                }
+            });
+            window.addEventListener('pagehide', flushOnLeave);
+
+            // 启动后稍等再首次上报，避免刚进页就打空请求
+            setTimeout(async () => {
+                await flushPlayTime();
+                scheduleNext();
+            }, REPORT_INTERVAL_MS);
         }
 
-        // 检查游戏时长相关成就
-        async checkPlayTimeAchievements(currentPlayTime) {
-            if (!currentPlayTime) return;
-
-            // 遍历所有基于 Steam 统计的成就
-            for (const [key, achievement] of Object.entries(ACHIEVEMENTS)) {
-                if (achievement.steamStat === 'PLAY_TIME_SECONDS' &&
-                    achievement.threshold &&
-                    currentPlayTime >= achievement.threshold &&
-                    !this.isUnlocked(key)) {
-                    await this.unlockAchievement(key);
-                }
+        // 同步 Steam 已通过 Progress Stat 解锁的计时成就到本地缓存（不主动 SetAchievement）
+        syncProgressStatAchievements(data) {
+            if (!data || data.success !== true) return;
+            const unlocked = Array.isArray(data.progressUnlocked) ? data.progressUnlocked : [];
+            for (const achievementName of unlocked) {
+                if (!ACHIEVEMENTS[achievementName]) continue;
+                if (this.isUnlocked(achievementName)) continue;
+                this.markUnlockedLocally(achievementName);
+                // Steam 客户端会弹官方成就通知；这里只补本地 toast/缓存
+                this.showAchievementNotification(ACHIEVEMENTS[achievementName]);
             }
         }
 
@@ -318,13 +411,37 @@
         }
     }
 
-    // 创建全局实例
-    window.achievementManager = new AchievementManager();
+    function installAchievementManager(manager) {
+        window.achievementManager = manager;
 
-    // 导出便捷函数
-    window.unlockAchievement = (name) => window.achievementManager.unlockAchievement(name);
-    window.incrementAchievementCounter = (counter, amount) => window.achievementManager.incrementCounter(counter, amount);
-    window.getAchievementStats = () => window.achievementManager.getStats();
+        // 导出便捷函数
+        window.unlockAchievement = (name) => window.achievementManager.unlockAchievement(name);
+        window.incrementAchievementCounter = (counter, amount) => window.achievementManager.incrementCounter(counter, amount);
+        window.getAchievementStats = () => window.achievementManager.getStats();
 
-    console.log('成就管理系统已初始化');
+        console.log('成就管理系统已初始化');
+    }
+
+    async function initAchievementManagerAfterStorageBarrier() {
+        if (typeof window.waitForStorageLocationStartupBarrier === 'function') {
+            try {
+                await window.waitForStorageLocationStartupBarrier();
+            } catch (error) {
+                console.warn('[Achievement] storage startup barrier failed; achievement manager init deferred', error);
+                return;
+            }
+        } else if (window.__nekoStorageLocationStartupBarrier
+            && typeof window.__nekoStorageLocationStartupBarrier.then === 'function') {
+            try {
+                await window.__nekoStorageLocationStartupBarrier;
+            } catch (error) {
+                console.warn('[Achievement] storage startup barrier failed; achievement manager init deferred', error);
+                return;
+            }
+        }
+
+        installAchievementManager(new AchievementManager());
+    }
+
+    initAchievementManagerAfterStorageBarrier();
 })();

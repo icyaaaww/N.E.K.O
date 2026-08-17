@@ -1,4 +1,18 @@
 # -*- coding: utf-8 -*-
+# Copyright 2025-2026 Project N.E.K.O. Team
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """
 VRM Router
 
@@ -7,6 +21,11 @@ Handles VRM model-related endpoints including:
 - VRM model upload
 - VRM animation listing
 - VRM emotion mapping configuration
+
+URL convention: routes declared WITHOUT trailing slash (no ``@router.get('/')``).
+See ``main_routers/characters_router.py`` docstring or
+``.agent/rules/neko-guide.md`` (§"API URL 末尾不带斜杠") for the rationale;
+enforced by ``scripts/check_api_trailing_slash.py``.
 """
 
 import json
@@ -19,7 +38,7 @@ from fastapi.responses import JSONResponse
 
 from .shared_state import get_config_manager
 from .workshop_router import get_subscribed_workshop_items
-from utils.file_utils import atomic_write_json
+from utils.file_utils import atomic_write_json_async, read_json_async
 from utils.logger_config import get_module_logger
 
 router = APIRouter(prefix="/api/model/vrm", tags=["vrm"])
@@ -36,12 +55,12 @@ CHUNK_SIZE = 1024 * 1024  # 1MB chunks for streaming
 
 
 def safe_vrm_path(vrm_dir: Path, filename: str, subdir: str | None = None) -> tuple[Path | None, str]:
-    """安全地构造和验证 VRM 目录内的路径，防止路径穿越攻击。
+    """Safely construct and validate paths inside the VRM directory, preventing path traversal attacks.
     
     Args:
-        vrm_dir: VRM根目录
-        filename: 文件名
-        subdir: 子目录（如 'animation'），可选
+        vrm_dir: VRM root directory
+        filename: file name
+        subdir: subdirectory (e.g. 'animation'), optional
     """
     try:
         # 使用 pathlib 构造路径
@@ -81,7 +100,7 @@ async def _handle_vrm_file_upload(
     file_type_name: str, 
     subdir: str | None = None
 ) -> JSONResponse:
-    """处理文件上传的通用流式逻辑喵~"""
+    """Common streaming logic for handling file uploads, nya~"""
     try:
         if not file:
             return JSONResponse(status_code=400, content={"success": False, "error": "没有上传文件"})
@@ -179,7 +198,7 @@ async def _handle_vrm_file_upload(
 
 @router.post('/upload')
 async def upload_vrm_model(file: UploadFile = File(...)):
-    """上传VRM模型到用户文档目录（使用流式读取和异步写入，防止路径穿越）"""
+    """Upload a VRM model to the user documents directory (streamed read + async write, prevents path traversal)."""
     # 获取用户文档的vrm目录
     config_mgr = get_config_manager()
     if not config_mgr.ensure_vrm_directory():
@@ -191,7 +210,7 @@ async def upload_vrm_model(file: UploadFile = File(...)):
 
 @router.post('/upload_animation')
 async def upload_vrm_animation(file: UploadFile = File(...)):
-    """上传VRM动作文件到用户文档目录"""
+    """Upload a VRM animation file to the user documents directory."""
     # 获取用户文档的vrm目录（ensure_vrm_directory 也会创建 animation 子目录）
     config_mgr = get_config_manager()
     if not config_mgr.ensure_vrm_directory():
@@ -203,7 +222,7 @@ async def upload_vrm_animation(file: UploadFile = File(...)):
 
 @router.get('/models')
 async def get_vrm_models():
-    """获取VRM模型列表（不暴露绝对文件系统路径）"""
+    """List VRM models (without exposing absolute filesystem paths)."""
     try:
         config_mgr = get_config_manager()
         config_mgr.ensure_vrm_directory()
@@ -318,7 +337,7 @@ async def get_vrm_models():
 
 @router.get('/animations')
 def get_vrm_animations():
-    """获取VRM动画文件列表（VRMA文件，不暴露绝对文件系统路径）"""
+    """List VRM animation files (VRMA, without exposing absolute filesystem paths)."""
     try:
         config_mgr = get_config_manager()
         try:
@@ -388,8 +407,10 @@ def get_vrm_animations():
                     # 默认使用 /user_vrm/animation
                     url_prefix = "/user_vrm/animation"
                 
-                # 查找.vrma文件
-                for anim_file in anim_dir.glob('*.vrma'):
+                # 用户导入动作保持标准 .vrma；内置动作使用 .vrma.gz，首次播放时
+                # 由前端统一解压。两种传输格式都必须出现在动作选择器中。
+                animation_files = list(anim_dir.glob('*.vrma')) + list(anim_dir.glob('*.vrma.gz'))
+                for anim_file in animation_files:
                     try:
                         if not anim_file.exists() or not anim_file.is_file():
                             continue
@@ -401,8 +422,10 @@ def get_vrm_animations():
                         seen_urls.add(url)
                         
                         # 移除绝对路径，只返回公共 URL 和相对信息
+                        display_name = anim_file.name[:-len('.vrma.gz')] \
+                            if anim_file.name.endswith('.vrma.gz') else anim_file.stem
                         animations.append({
-                            "name": anim_file.stem,
+                            "name": display_name,
                             "filename": anim_file.name,
                             "url": url,
                             "type": "vrma",
@@ -461,7 +484,7 @@ def get_vrm_animations():
 
 @router.delete('/model')
 async def delete_vrm_model(request: Request):
-    """删除用户导入的 VRM 模型文件"""
+    """Delete a user-imported VRM model file."""
     try:
         body = await request.json()
         url = body.get('url', '')
@@ -502,7 +525,7 @@ async def delete_vrm_model(request: Request):
 # 新增配置获取接口
 @router.get('/config')
 async def get_vrm_config():
-    """获取前后端统一的路径配置"""
+    """Get the path configuration shared between frontend and backend."""
     return JSONResponse(content={
         "success": True,
         "paths": {
@@ -527,7 +550,7 @@ DEFAULT_MOOD_MAP = {
 
 
 def _get_emotion_config_path(model_name: str) -> Path | None:
-    """获取模型情感配置文件路径"""
+    """Get the emotion config file path for a model."""
     # 允许 Unicode 单词字符、点、下划线、连字符（与 _get_model_path 保持一致）
     safe_name = re.sub(r'[^\w.\-]', '', model_name, flags=re.UNICODE)
     if not safe_name or safe_name != model_name:
@@ -553,7 +576,7 @@ def _get_emotion_config_path(model_name: str) -> Path | None:
 
 
 def _get_model_path(model_name: str) -> tuple[Path | None, str]:
-    """获取VRM模型文件路径，返回 (path, url_prefix)"""
+    """Get the VRM model file path; returns (path, url_prefix)."""
     # 仅允许字母、数字、点、下划线、连字符（含 CJK 等 Unicode 单词字符）
     safe_name = re.sub(r'[^\w.\-]', '', model_name, flags=re.UNICODE)
     if not safe_name or safe_name != model_name:
@@ -592,7 +615,7 @@ def _get_model_path(model_name: str) -> tuple[Path | None, str]:
 
 @router.delete('/model/{model_name}')
 def delete_vrm_model(model_name: str):
-    """删除指定的用户导入 VRM 模型"""
+    """Delete the specified user-imported VRM model."""
     try:
         config_mgr = get_config_manager()
         config_mgr.ensure_vrm_directory()
@@ -633,7 +656,7 @@ def delete_vrm_model(model_name: str):
 
 @router.get('/emotion_mapping/{model_name}')
 async def get_emotion_mapping(model_name: str):
-    """获取VRM模型的情感映射配置"""
+    """Get the emotion mapping configuration of a VRM model."""
     try:
         config_path = _get_emotion_config_path(model_name)
 
@@ -647,8 +670,7 @@ async def get_emotion_mapping(model_name: str):
             )
 
         if config_path.exists():
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config = json.load(f)
+            config = await read_json_async(config_path)
             return {"success": True, "config": config}
         else:
             # 返回默认配置
@@ -668,7 +690,7 @@ async def get_emotion_mapping(model_name: str):
 
 @router.post('/emotion_mapping/{model_name}')
 async def update_emotion_mapping(model_name: str, request: Request):
-    """更新VRM模型的情感映射配置"""
+    """Update the emotion mapping configuration of a VRM model."""
     try:
         data = await request.json()
 
@@ -724,7 +746,7 @@ async def update_emotion_mapping(model_name: str, request: Request):
                 content={"success": False, "error": "无法创建配置目录"}
             )
 
-        atomic_write_json(config_path, normalized_data, ensure_ascii=False, indent=2)
+        await atomic_write_json_async(config_path, normalized_data, ensure_ascii=False, indent=2)
 
         logger.info(f"已保存VRM模型 {model_name} 的情感映射配置")
 
@@ -745,7 +767,7 @@ async def update_emotion_mapping(model_name: str, request: Request):
 
 @router.get('/expressions/{model_name}')
 async def get_model_expressions(model_name: str):
-    """获取VRM模型支持的表情列表（从配置中读取，如果有的话）"""
+    """Get the list of expressions supported by a VRM model (read from config, if present)."""
     # TODO: model_name parameter is intentionally unused. Model-specific expression
     # resolution is not implemented here because VRM files must be parsed on the frontend.
     # The frontend obtains actual expression lists after loading the model.

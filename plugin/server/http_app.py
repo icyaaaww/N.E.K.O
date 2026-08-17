@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import faulthandler
+import importlib
 import os
 import signal
 import threading
@@ -15,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import Response
 
 from plugin.logging_config import get_logger
+from utils.host_origin_guard import HostOriginGuardMiddleware
 from utils.logger_config import get_module_logger
 from plugin.server.infrastructure.exceptions import register_exception_handlers
 from plugin.server.lifecycle import shutdown as lifecycle_shutdown
@@ -23,9 +25,12 @@ from plugin.server.routes import (
     config_router,
     frontend_router,
     health_router,
+    llm_tools_router,
     logs_router,
+    market_bridge_router,
     messages_router,
     metrics_router,
+    plugin_cli_router,
     plugin_ui_router,
     plugins_router,
     runs_router,
@@ -43,6 +48,36 @@ else:
 
 def _can_register_faulthandler_signal() -> bool:
     return hasattr(faulthandler, "register") and hasattr(signal, "SIGUSR1")
+
+
+def _include_optional_router(
+    app: FastAPI,
+    *,
+    module_name: str,
+    router_name: str = "router",
+    label: str,
+) -> None:
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError as exc:
+        logger.warning(
+            "{} unavailable, endpoints will be 404: err_type={}, err={}",
+            label,
+            type(exc).__name__,
+            str(exc),
+        )
+        return
+
+    router = getattr(module, router_name, None)
+    if router is None:
+        logger.error(
+            "{} unavailable, endpoints will be 404: missing {}",
+            label,
+            router_name,
+        )
+        return
+
+    app.include_router(router)
 
 
 @asynccontextmanager
@@ -97,6 +132,36 @@ async def plugin_server_lifespan(app: FastAPI) -> AsyncIterator[None]:
     # via the user_plugin_enabled flag — do NOT auto-start here.
     if not _EMBEDDED_BY_AGENT:
         await lifecycle_startup()
+
+    # Install-source lock subsystem: tracks plugin provenance (builtin/manual/
+    # imported/market). Runs after lifecycle_startup so filesystem state is stable.
+    try:
+        from plugin.server.application.install_source import (
+            StartupReconciler,
+            build_install_source_manager,
+            set_global_manager,
+        )
+        _install_source_mgr = build_install_source_manager()
+        await StartupReconciler(_install_source_mgr).run()
+        set_global_manager(_install_source_mgr)
+    except Exception as exc:
+        logger.error(
+            "InstallSourceManager init failed, subsystem degraded: {}", exc,
+        )
+        try:
+            from plugin.server.application.install_source import set_global_manager
+            set_global_manager(None)
+        except Exception:
+            pass  # already in degraded mode
+
+    # Write bridge token file for Market frontend / URI handler
+    try:
+        from plugin.server.routes.market_bridge import write_bridge_token_file
+        from pathlib import Path
+        write_bridge_token_file(Path.home() / ".neko")
+    except Exception as exc:
+        logger.warning("Failed to write bridge token file: {}", exc)
+
     try:
         yield
     finally:
@@ -119,6 +184,9 @@ async def plugin_server_lifespan(app: FastAPI) -> AsyncIterator[None]:
 def build_plugin_server_app(title: str = "N.E.K.O User Plugin Server") -> FastAPI:
     app = FastAPI(title=title, lifespan=plugin_server_lifespan)
 
+    # Market 域名通过 settings 配置，支持自部署
+    from plugin.settings import MARKET_ORIGINS as _market_origins
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -126,11 +194,13 @@ def build_plugin_server_app(title: str = "N.E.K.O User Plugin Server") -> FastAP
             "http://127.0.0.1:5173",
             "http://localhost:48911",
             "http://127.0.0.1:48911",
+            *_market_origins,
         ],
         allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["X-Error-Code"],
     )
 
     register_exception_handlers(app)
@@ -166,4 +236,18 @@ def build_plugin_server_app(title: str = "N.E.K.O User Plugin Server") -> FastAP
     app.include_router(frontend_router)
     app.include_router(websocket_router)
     app.include_router(plugin_ui_router)
+    # Built-in plugin routes are optional. In AppImage/Nuitka builds,
+    # ``plugin.plugins`` can be intentionally excluded, and optional plugin
+    # import-time failures must not prevent the base plugin server from starting.
+    _include_optional_router(
+        app,
+        module_name="plugin.server.routes.plugin_install",
+        label="plugin install routes",
+    )
+    app.include_router(plugin_cli_router)
+    app.include_router(llm_tools_router)
+    app.include_router(market_bridge_router)
+    # Keep the Host/Origin guard outside CORS and the cache-header middleware;
+    # untrusted requests must not be short-circuited before the guard runs.
+    app.add_middleware(HostOriginGuardMiddleware)
     return app

@@ -11,7 +11,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, ClassVar, Dict, Optional, TypeVar
 
-from loguru import logger
+from plugin.logging_config import logger
 
 from plugin.utils.time_utils import now_iso
 from plugin.settings import (
@@ -29,6 +29,7 @@ from plugin.core.zmq_transport import (
 )
 
 _T = TypeVar("_T")
+STARTUP_RESULT_REQ_ID = "__plugin_startup__"
 
 
 @dataclass
@@ -50,6 +51,7 @@ class PluginCommunicationResourceManager:
     _message_target_queue: Optional[asyncio.Queue] = None
     _background_tasks: set[asyncio.Task] = field(default_factory=set)
     _owner_loop: Optional[asyncio.AbstractEventLoop] = None
+    _startup_result: Optional[dict] = field(default=None, init=False, repr=False)
     _last_forward_log_key: Optional[tuple] = field(default=None, init=False, repr=False)
     _last_forward_log_time: float = field(default=0.0, init=False, repr=False)
     _last_forward_log_repeat_count: int = field(default=0, init=False, repr=False)
@@ -89,6 +91,54 @@ class PluginCommunicationResourceManager:
 
     async def start(self, message_target_queue: Optional[asyncio.Queue] = None) -> None:
         await self._run_on_owner_loop(self._start_local(message_target_queue=message_target_queue))
+
+    async def _prepare_startup_wait_local(self) -> None:
+        existing = self._pending_futures.pop(STARTUP_RESULT_REQ_ID, None)
+        if existing is not None and not existing.done():
+            existing.cancel()
+        self._startup_result = None
+        self._pending_futures[STARTUP_RESULT_REQ_ID] = asyncio.get_running_loop().create_future()
+
+    async def prepare_startup_wait(self) -> None:
+        await self._run_on_owner_loop(self._prepare_startup_wait_local())
+
+    async def _wait_for_startup_local(self, timeout: float, allow_startup_error: bool = False) -> Any:
+        result = self._startup_result
+        if result is None:
+            future = self._pending_futures.get(STARTUP_RESULT_REQ_ID)
+            if future is None:
+                future = asyncio.get_running_loop().create_future()
+                self._pending_futures[STARTUP_RESULT_REQ_ID] = future
+            try:
+                result = await asyncio.wait_for(future, timeout=timeout)
+            except asyncio.TimeoutError:
+                self._pending_futures.pop(STARTUP_RESULT_REQ_ID, None)
+                raise TimeoutError(
+                    f"Plugin {self.plugin_id} startup timed out after {timeout}s"
+                ) from None
+
+        self._pending_futures.pop(STARTUP_RESULT_REQ_ID, None)
+        self._startup_result = None
+        if isinstance(result, dict):
+            data = result.get("data")
+            if isinstance(data, dict) and data.get("startup_error"):
+                if allow_startup_error:
+                    return data
+                raise RuntimeError(str(data["startup_error"]))
+            if result.get("success"):
+                return data
+            error = result.get("error")
+        else:
+            error = result
+        raise RuntimeError(str(error or "plugin startup failed"))
+
+    async def wait_for_startup(self, timeout: float, allow_startup_error: bool = False) -> Any:
+        return await self._run_on_owner_loop(
+            self._wait_for_startup_local(
+                timeout=timeout,
+                allow_startup_error=allow_startup_error,
+            )
+        )
 
     async def _shutdown_local(self, timeout: float = PLUGIN_SHUTDOWN_TIMEOUT) -> None:
         self.logger.debug("Shutting down communication for plugin {}", self.plugin_id)
@@ -198,6 +248,17 @@ class PluginCommunicationResourceManager:
             ct.add_done_callback(self._background_tasks.discard)
             raise TimeoutError(f"{error_context} execution timed out after {timeout}s") from None
 
+    async def _send_command_and_wait(
+        self,
+        req_id: str,
+        msg: dict,
+        timeout: float | None,
+        error_context: str,
+    ) -> Any:
+        return await self._run_on_owner_loop(
+            self._send_command_and_wait_local(req_id, msg, timeout, error_context)
+        )
+
     async def trigger(self, entry_id: str, args: dict, timeout: float | None = PLUGIN_TRIGGER_TIMEOUT) -> Any:
         return await self._run_on_owner_loop(self._trigger_local(entry_id, args, timeout))
 
@@ -220,6 +281,11 @@ class PluginCommunicationResourceManager:
         return await self._run_on_owner_loop(
             self._trigger_custom_event_local(event_type, event_id, args, timeout)
         )
+
+    async def get_ui_context(self, context_id: str = "main", timeout: float = 5.0) -> Any:
+        req_id = str(uuid.uuid4())
+        msg = {"type": "UI_CONTEXT", "req_id": req_id, "context_id": str(context_id or "main")}
+        return await self._send_command_and_wait(req_id, msg, timeout, f"ui context {context_id}")
 
     async def _trigger_custom_event_local(
         self,
@@ -339,6 +405,13 @@ class PluginCommunicationResourceManager:
     _MESSAGE_ROUTING: ClassVar[Dict[str, str]] = {
         "ENTRY_UPDATE": "_handle_entry_update",
         "STATIC_UI_REGISTER": "_handle_static_ui_register",
+        "LIST_ACTIONS_UPDATE": "_handle_list_actions_update",
+        # LLM tool registration messages — see
+        # plugin/sdk/plugin/llm_tool.py for the producer side and
+        # plugin/server/messaging/llm_tool_registry.py for the
+        # main_server-side bookkeeping.
+        "LLM_TOOL_REGISTER": "_handle_llm_tool_register",
+        "LLM_TOOL_UNREGISTER": "_handle_llm_tool_unregister",
     }
 
     async def _consume_uplink(self) -> None:
@@ -397,7 +470,10 @@ class PluginCommunicationResourceManager:
         if fut:
             if not fut.done():
                 fut.set_result(res)
-            self._pending_futures.pop(req_id, None)
+            if req_id != STARTUP_RESULT_REQ_ID:
+                self._pending_futures.pop(req_id, None)
+        elif req_id == STARTUP_RESULT_REQ_ID:
+            self._startup_result = res
         else:
             self.logger.warning(
                 "Result for unknown req_id {} from plugin {}. Known: {}",
@@ -569,3 +645,126 @@ class PluginCommunicationResourceManager:
                     state.invalidate_snapshot_cache("plugins")
         except Exception:
             self.logger.exception("Failed to handle STATIC_UI_REGISTER")
+
+    async def _handle_llm_tool_register(self, msg: Dict[str, Any]) -> None:
+        """Handle an LLM_TOOL_REGISTER IPC notification from a plugin.
+
+        The plugin process emits this message after it has stored the
+        handler locally as a dynamic entry (so ``host.trigger`` will hit
+        it later). Our job is to register the same tool with
+        ``main_server`` so the LLM can discover and call it. The actual
+        dispatch path is plugin process ◄── ``host.trigger`` IPC ◄──
+        ``/api/llm-tools/callback`` HTTP route ◄── ``main_server``.
+
+        Errors are logged but never re-raised — the plugin already
+        committed locally, and a transient ``main_server`` outage
+        shouldn't crash the plugin's uplink consumer. The plugin can
+        observe success/failure later via list_tools or by issuing a
+        re-register.
+        """
+        try:
+            from plugin.server.messaging.llm_tool_registry import register_remote_tool
+
+            incoming_pid = msg.get("plugin_id")
+            if incoming_pid and incoming_pid != self.plugin_id:
+                self.logger.warning(
+                    "LLM_TOOL_REGISTER plugin_id mismatch: expected={}, got={}",
+                    self.plugin_id, incoming_pid,
+                )
+                return
+
+            name = msg.get("name")
+            if not isinstance(name, str) or not name:
+                self.logger.warning("LLM_TOOL_REGISTER missing name: {}", msg)
+                return
+
+            description = msg.get("description") or ""
+            parameters = msg.get("parameters")
+            if not isinstance(parameters, dict):
+                parameters = {"type": "object", "properties": {}}
+            timeout_seconds = msg.get("timeout_seconds")
+            if not isinstance(timeout_seconds, (int, float)) or timeout_seconds <= 0:
+                timeout_seconds = 30.0
+            role = msg.get("role")
+            if role is not None and not isinstance(role, str):
+                role = None
+
+            await register_remote_tool(
+                plugin_id=self.plugin_id,
+                name=name,
+                description=str(description),
+                parameters=parameters,
+                timeout_seconds=float(timeout_seconds),
+                role=role,
+            )
+            self.logger.info(
+                "LLM tool registered with main_server: plugin={} name={}",
+                self.plugin_id, name,
+            )
+        except Exception:
+            self.logger.exception("Failed to handle LLM_TOOL_REGISTER")
+
+    async def _handle_llm_tool_unregister(self, msg: Dict[str, Any]) -> None:
+        """Handle an LLM_TOOL_UNREGISTER IPC notification from a plugin."""
+        try:
+            from plugin.server.messaging.llm_tool_registry import unregister_remote_tool
+
+            incoming_pid = msg.get("plugin_id")
+            if incoming_pid and incoming_pid != self.plugin_id:
+                self.logger.warning(
+                    "LLM_TOOL_UNREGISTER plugin_id mismatch: expected={}, got={}",
+                    self.plugin_id, incoming_pid,
+                )
+                return
+
+            name = msg.get("name")
+            if not isinstance(name, str) or not name:
+                self.logger.warning("LLM_TOOL_UNREGISTER missing name: {}", msg)
+                return
+            role = msg.get("role")
+            if role is not None and not isinstance(role, str):
+                role = None
+
+            await unregister_remote_tool(
+                plugin_id=self.plugin_id,
+                name=name,
+                role=role,
+            )
+            self.logger.info(
+                "LLM tool unregistered from main_server: plugin={} name={}",
+                self.plugin_id, name,
+            )
+        except Exception:
+            self.logger.exception("Failed to handle LLM_TOOL_UNREGISTER")
+
+    async def _handle_list_actions_update(self, msg: Dict[str, Any]) -> None:
+        try:
+            from plugin.core.state import state
+
+            plugin_id = self.plugin_id
+            actions = msg.get("actions")
+            if not isinstance(actions, list):
+                self.logger.warning("LIST_ACTIONS_UPDATE missing actions list from plugin {}", plugin_id)
+                return
+
+            updated = False
+            with state.acquire_plugins_write_lock():
+                plugin_meta = state.plugins.get(plugin_id)
+                if isinstance(plugin_meta, dict):
+                    plugin_meta["list_actions"] = [
+                        dict(item) for item in actions if isinstance(item, dict)
+                    ]
+                    state.plugins[plugin_id] = plugin_meta
+                    updated = True
+                else:
+                    self.logger.warning("Plugin {} not found in state.plugins", plugin_id)
+                if updated:
+                    state.invalidate_snapshot_cache("plugins")
+            if updated:
+                self.logger.info(
+                    "List actions updated for plugin {}: {} actions",
+                    plugin_id,
+                    len(actions),
+                )
+        except Exception:
+            self.logger.exception("Failed to handle LIST_ACTIONS_UPDATE")

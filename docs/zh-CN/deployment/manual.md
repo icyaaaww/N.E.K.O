@@ -1,15 +1,4 @@
-# 手动搭建
-
-适用于在任何平台上进行开发和自定义。
-
-## 前置条件
-
-- Python 3.11（必须是此版本，不支持 3.12+）
-- [uv](https://docs.astral.sh/uv/getting-started/installation/) 包管理器
-- Node.js（>=20.19）
-- Git
-
-## 安装
+# 源码手动部署
 
 ```bash
 git clone https://github.com/Project-N-E-K-O/N.E.K.O.git
@@ -17,69 +6,38 @@ cd N.E.K.O
 uv sync
 ```
 
+Python 固定为 3.11；所有 Python 模块、脚本、测试和临时命令都通过 `uv run`。
+
 ## 构建前端
 
-项目在 `frontend/` 下有两个前端项目，运行前需要先构建。
-
-**推荐** —— 从项目根目录使用一键脚本，这是官方支持的构建方式：
+```powershell
+.\build_frontend.bat
+```
 
 ```bash
-# Windows
-build_frontend.bat
-
-# Linux / macOS
 ./build_frontend.sh
 ```
 
-如需手动执行，命令必须与脚本保持一致：
+脚本校验/解压内置 Live2D 模型（Yui Lolita、Yui Origin），运行 `npm ci`，生成 plugin manager 与共享 React chat bundle。
+
+## 正常启动
 
 ```bash
-cd frontend/react-neko-chat && npm install && npm run build && cd ../..
-cd frontend/plugin-manager && npm install && npm run build-only && cd ../..
+uv run python launcher.py
 ```
 
-## 运行
+launcher 规划端口、启动 memory/main/agent、协调关闭，并在服务前应用暂存的 cloud-save snapshot。使用它报告的 URL；48911 只是首选值。
 
-在不同终端中启动所需的服务器：
+## 诊断拆分模式
 
 ```bash
-# 终端 1 — 记忆服务器（必需）
-uv run python memory_server.py
-
-# 终端 2 — 主服务器（必需）
-uv run python main_server.py
-
-# 终端 3 — 智能体服务器（可选）
-uv run python agent_server.py
+uv run python -m app.memory_server
+uv run python -m app.main_server
+uv run python -m app.agent_server
 ```
 
-## 配置
+只有 memory + main 时主 UI 可加载，但 Agent、托管插件、浏览器/电脑控制等需要 agent/tool。拆分模式不复现 launcher 的端口回退与生命周期。
 
-1. 在浏览器中打开 `http://localhost:48911/api_key`
-2. 选择你的核心 API 服务商
-3. 输入你的 API 密钥
-4. 点击保存
+Cloud Save 的 Steam RemoteStorage 路径应通过 Steam/桌面 launcher 验证。拆分 main server 可执行后备 snapshot 导入并通知 memory reload；退出不会自动把运行时变化暂存，需由 Cloud Save Manager 准备上传 snapshot。
 
-或者，在启动前设置环境变量：
-
-```bash
-export NEKO_CORE_API_KEY="sk-your-key"
-export NEKO_CORE_API="qwen"
-uv run python main_server.py
-```
-
-## 替代方案：pip 安装
-
-如果你更喜欢 pip 而非 uv：
-
-```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python memory_server.py
-python main_server.py
-```
-
-## 验证
-
-打开 `http://localhost:48911`，你应该能看到角色界面。
+在主 URL 的 `/api_key` 选择当前 Core/Assist Provider、填写密钥并运行连通性检查。源码模式不消费 Docker API 初始化变量。`/health` 用于启动诊断。

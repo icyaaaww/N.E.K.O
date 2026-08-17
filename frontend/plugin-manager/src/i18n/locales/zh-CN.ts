@@ -17,6 +17,12 @@ export default {
     back: '返回',
     submit: '提交',
     close: '关闭',
+    minimize: '最小化',
+    maximize: '最大化',
+    restore: '恢复',
+    pinWindow: '置顶窗口',
+    unpinWindow: '取消置顶',
+    toggleSelection: '切换选中状态',
     success: '成功',
     error: '错误',
     warning: '警告',
@@ -38,7 +44,130 @@ export default {
     runs: '运行记录',
     serverLogs: '服务器日志',
     adapters: '适配器',
-    adapterUI: '适配器界面'
+    adapterUI: '适配器界面',
+    packageManager: '包管理',
+    market: '插件市场'
+  },
+  market: {
+    title: '获取新插件',
+    subtitle: '从插件市场浏览和安装插件',
+    getNewPlugins: '获取新插件',
+    openMarket: '打开插件市场',
+    closeMarket: '收起插件市场',
+    openInBrowser: '在浏览器打开',
+    account: 'Market 账号',
+    accountConnected: '已连接: {name}',
+    login: '登录',
+    loginStarted: '已为你打开浏览器，请在打开的页面里完成授权登录。',
+    loginSuccess: '授权登录已完成，可以继续使用插件市场',
+    authTokenRejected: 'Auth 授权已失效，请重新登录',
+    authVerificationPending: '浏览器授权已返回，正在确认 Auth 身份，无需重复授权',
+    authVerificationPendingLabel: '正在确认 Auth 身份',
+    marketTokenRejected: 'Auth 登录有效，但 Market 未接受当前凭据',
+    marketForbidden: 'Auth 登录有效，但 Market 账号不可用或权限不足',
+    marketIdentityConflict: 'Auth 登录有效，但 Market 账号关联冲突；无需重复授权，请联系管理员处理',
+    marketUnavailable: 'Auth 登录成功，Market 暂时不可用，正在自动重试',
+    marketInvalidResponse: 'Auth 登录成功，但 Market 返回了无法识别的响应',
+    loginFailed: '授权登录没有完成，请稍后再试',
+    loginPending: '授权登录等待时间有点久，请重新发起登录',
+    logoutSuccess: '已在本机退出授权登录',
+    logoutFailed: '退出失败，请稍后重试',
+    accountSummary: '账户信息',
+    accountSummaryLoading: '正在更新账户信息…',
+    accountMemberDays: '加入 {days} 天',
+    accountPublished: '已发布 {count} 个插件',
+    logout: '退出登录',
+    logoutConfirm: '确认退出此设备上的插件市场授权登录吗？',
+    searchPlaceholder: '搜索插件...',
+    notConfigured: '插件市场未配置',
+    configHint: '请将 NEKO_MARKET_API_URL 设置为插件市场服务地址',
+    noResults: '没有找到插件',
+    loadFailed: '插件市场加载失败，请稍后重试',
+    retry: '重试',
+    install: '安装',
+    installed: '已安装',
+    installing: '安装中...',
+    installSuccess: '安装完成: {name}',
+    installFailed: '安装失败',
+    installPreparing: '正在准备安装...',
+    installAlreadyRunning: '已有安装任务正在进行，请等待其完成',
+    cancelInstall: '取消安装',
+    cancelInstallUnavailable: '安装已进入无法安全取消的阶段',
+    silentInstall: '静默安装',
+    installCancelled: '安装已取消',
+    viewInstallProgress: '查看安装进度',
+    installTakingLonger: '安装耗时超出预期，任务仍在继续。可以继续等待，也可以取消。',
+    installTaskLost: '安装任务已不存在，请检查插件状态后再重试。',
+    installDialogTitle: '正在安装 {name}',
+    installDialogTitleUpgrade: '正在升级 {name}',
+    installCompleted: '安装完成',
+    installCompletedUpgrade: '升级完成',
+    rollbackRunning: '安装失败，正在回滚...',
+    rollbackCompleted: '已回滚到之前的版本',
+    installStage: {
+      pending: '准备中',
+      download: '下载',
+      verify: '校验',
+      install: '安装',
+      replace: '替换文件',
+      rollback: '回滚',
+      completed: '完成',
+      failed: '失败',
+      canceled: '已取消',
+    },
+    noDownloadUrl: '该插件没有可用的下载地址',
+    pairRequired: '需要配对 Bridge Token',
+    recommended: '推荐',
+    allPlugins: '全部插件',
+    noDescription: '暂无描述',
+    unknownAuthor: '未知',
+    filterRules: '筛选规则',
+    filterRulesTitle: '搜索语法',
+    filterRulesHint: '点击规则插入到搜索框，支持 key:value 组合，加 - 前缀为排除',
+    filterGroups: {
+      state: '状态',
+      zone: '专区',
+      meta: '元数据'
+    },
+    filterLabels: {
+      recommended: '推荐插件',
+      installed: '已安装',
+      uninstalled: '未安装',
+      tag: '标签',
+      author: '作者',
+      name: '名称',
+      versionGte: '版本 ≥',
+      hasRepo: '含仓库',
+      hasTags: '含标签'
+    },
+    zones: {
+      game: '游戏',
+      companion: '伴侣',
+      function: '功能',
+      entertainment: '娱乐',
+      tool: '工具'
+    },
+    sortNewest: '最新',
+    sortMostDownloads: '下载量',
+    sortTopRated: '评分',
+    sortName: '名称',
+    upgrading: '升级中...',
+    upgradeTo: '升级到 v{version}',
+    upgradeSuccess: '升级成功: {name}',
+    yanked: '已撤回',
+    yankedDefault: '该版本已被作者撤回',
+    noVersionAvailable: '暂无可用版本',
+    upgradeRollback: '升级失败，已回滚到旧版本',
+    upgradeAlreadyAtTarget: '当前已是目标版本',
+    upgradeTargetNotGreater: '升级目标版本不高于已装版本',
+    pluginNotInstalled: '该插件未安装，无法升级',
+    lockWriteFailed: '安装记录写入失败'
+  },
+  settings: {
+    channel: '更新渠道',
+    channelStable: '稳定版',
+    channelBeta: '测试版',
+    channelHint: '切换后所有插件列表将按所选渠道刷新；不影响已安装插件运行'
   },
   auth: {
     unauthorized: '未授权访问',
@@ -71,7 +200,9 @@ export default {
     sdkVersion: 'SDK 版本',
     updateTime: '更新时间',
     noMetricsData: '暂无性能数据',
-    failedToLoadServerInfo: '无法加载服务器信息'
+    failedToLoadServerInfo: '无法加载服务器信息',
+    startTutorial: '教程引导',
+    tutorialHint: '第一次使用插件管理器？点这里让我带你快速认识一下。'
   },
   plugins: {
     title: '插件列表',
@@ -109,7 +240,38 @@ export default {
     noEntries: '暂无入口点',
     showMetrics: '显示性能指标',
     hideMetrics: '隐藏性能指标',
-    filterPlaceholder: '筛选插件（支持正则/文本）',
+    showSourceDetail: '显示来源详情',
+    hideSourceDetail: '隐藏来源详情',
+    installSource: {
+      channel: {
+        builtin: '内置',
+        manual: '手动',
+        imported: '导入',
+        market: '市场',
+        unknown: '未知',
+      },
+      // v2: Market release channel values displayed on SourceDetailRow.
+      channelLabels: {
+        stable: '稳定版',
+        beta: '测试版',
+        unknown: '未知',
+      },
+      updateAvailable: '有新版本',
+      labels: {
+        installedAt: '安装时间',
+        packageFilename: '安装包',
+        sha256: 'SHA-256',
+        marketId: '市场 ID',
+        version: '当前版本',
+        previousVersion: '上一版本',
+        latestAvailable: '最新版本',
+        channel: '渠道',
+      },
+    },
+    filterPlaceholder: '筛选插件（支持正则、拼音与 is:/type:/has: 规则）',
+    filterRules: '规则',
+    filterRulesTitle: '筛选规则',
+    filterRulesHint: '点击下方规则可直接插入到查询框，支持与普通文本组合使用。',
     filterWhitelist: '白名单',
     filterBlacklist: '黑名单',
     invalidRegex: '正则表达式无效',
@@ -148,23 +310,201 @@ export default {
     autoStart: '自动启动',
     manualStart: '手动启动',
     fetchFailed: '获取插件列表失败',
-    extension: '扩展',
     pluginType: '类型',
     pluginTypeNormal: '插件',
     hostPlugin: '宿主插件',
-    boundExtensions: '绑定扩展',
     pluginsSection: '插件',
     adaptersSection: '适配器',
-    extensionsSection: '扩展',
     typePlugin: '插件',
     typeAdapter: '适配器',
-    typeExtension: '扩展',
-    disableExtension: '禁用扩展',
-    enableExtension: '启用扩展',
+    layoutList: '列表',
+    layoutSingle: '单排',
+    layoutDouble: '双排',
+    layoutCompact: '紧凑',
+    openPackageManager: '包管理',
+    closePackageManager: '收起包管理',
+    packageManagerOpened: '包管理已展开',
+    packageManagerSyncHint: '当前筛选和多选结果会直接同步到右侧包管理面板。',
+    multiSelect: '多选',
+    exitMultiSelect: '退出多选',
+    selectedCount: '已选 {count} 项',
+    selectAllVisible: '全选当前',
+    invertVisibleSelection: '反选当前',
+    clearSelection: '清空选择',
+    batchStartConfirm: '确认批量启动 {count} 个插件？',
+    batchStopConfirm: '确认批量停止 {count} 个运行中的插件？',
+    batchReloadConfirm: '确认批量重载 {count} 个运行中的插件？',
+    batchDeleteConfirm: '确认批量删除 {count} 个插件？此操作不可逆。',
+    batchStartSuccess: '已成功启动 {count} 个插件',
+    batchStopSuccess: '已成功停止 {count} 个插件',
+    batchReloadSuccess: '已成功重载 {count} 个插件',
+    batchDeleteSuccess: '已成功删除 {count} 个插件',
+    batchPartial: '操作完成：{success} 个成功，{fail} 个失败',
+    batchNoStartable: '选中的插件中没有可启动的',
+    batchNoStoppable: '选中的插件中没有运行中的',
+    batchNoReloadable: '选中的插件中没有运行中的',
+    import: '导入',
+    importing: '导入中…',
+    importSuccess: '已导入 {name}，安装了 {count} 个插件',
+    importFailed: '导入失败',
+    export: '导出',
+    exportSuccess: '已导出 {count} 个包',
+    exportFailed: '导出失败',
+    exportBuildFailed: '构建失败，无法导出',
+    filterRuleGroups: {
+      state: '状态',
+      type: '类型',
+      meta: '元数据'
+    },
+    filterRuleLabels: {
+      running: '运行中',
+      stopped: '已停止',
+      disabled: '已禁用',
+      selected: '当前已选',
+      manual: '手动启动',
+      auto: '自动启动',
+      plugin: '插件',
+      adapter: '适配器',
+      ui: '带界面',
+      entries: '有入口点',
+      name: '按名称',
+      id: '按 ID',
+      version: '按版本',
+      entry: '按入口点',
+      author: '按作者'
+    },
+    contextSections: {
+      navigation: '浏览',
+      runtime: '运行',
+      plugin: '扩展功能'
+    },
+    build: '构建插件',
+    delete: '删除插件',
+    dangerDialog: {
+      title: '危险操作确认',
+      warningTitle: '不可逆操作',
+      deleteMessage: '删除插件“{pluginName}”后，其目录会被移除，当前列表也会立即刷新。',
+      hint: '为避免误触，请按住下方按钮完成确认。',
+      holdIdle: '按住以确认删除',
+      holdActive: '继续按住，正在确认…',
+      loading: '正在删除插件…'
+    },
     ui: {
+      open: '打开界面',
+      title: '界面',
+      panel: '面板',
+      guide: '教程',
       loading: '加载插件界面中...',
       loadError: '加载插件界面失败',
-      noUI: '该插件没有自定义界面'
+      noUI: '该插件没有自定义界面',
+      hostedTsxPending: 'Hosted TSX 渲染即将支持',
+      markdownPending: 'Markdown 教程渲染即将支持',
+      autoPending: '自动生成面板即将支持',
+      surfaceUnavailable: 'Surface 暂不可用',
+      surfaceEntryMissing: '该 Surface 声明的入口文件不存在，请检查 plugin.toml 中的 entry 路径。',
+      surfaceWarnings: '插件 UI 声明存在需要处理的问题',
+      controlError: '插件界面控件错误',
+      hostedRuntimePending: '前端容器已经识别到该 Surface。TSX/Markdown/Auto 渲染器会在后续阶段接入。'
+    }
+  },
+  package: {
+    install: {
+      safeUpgradeHint: '重复导入同一插件时会先检查版本，并通过可回滚的安全升级替换原目录，不会生成带后缀的副本。',
+      planFailed: '无法检查安装包。',
+      packageRequired: '请先输入包路径。',
+      installFailed: '安装失败：{error}',
+      upgradeTitle: '升级 {plugin}？',
+      upgradeBody: '版本 {current} 将替换为 {target}。正在运行的插件会短暂重启。',
+      upgradeConfirm: '升级插件',
+      upgradeCancelled: '已取消升级。',
+      upgradeSucceeded: '{plugin} 已成功升级。',
+      blockedBundleConflict: '此整合包包含已安装的插件，请逐个升级其中的插件。',
+      blockedDirectoryConflict: '目标目录属于另一个插件，未进行任何更改。',
+      blockedLegacyPlugin: '仍安装着此插件的旧版本。请先卸载 {plugin} 再继续。',
+      rollbackCompleted: '升级失败，已恢复之前的版本。',
+      rollbackIncomplete: '升级失败且回滚未完整完成，请检查插件状态后再继续。'
+    },
+    dialog: {
+      title: '包管理执行记录',
+      subtitle: '保留最近 {count} 条执行结果'
+    },
+    empty: '执行包管理操作后，这里会显示记录',
+    viewDetail: '查看详情',
+    detail: {
+      title: '结果详情',
+      field: {
+        packageId: '包 ID',
+        kind: '类型',
+        version: '版本',
+        schema: 'Schema',
+        hashCheck: 'Hash 校验',
+        profiles: 'Profiles'
+      },
+      list: '明细',
+      warning: '注意',
+      rawJson: '原始结果 JSON'
+    },
+    hash: {
+      notVerified: '未校验',
+      passed: '通过',
+      failed: '失败'
+    },
+    kind: {
+      build: '构建',
+      inspect: '检查',
+      verify: '校验',
+      install: '安装',
+      analyze: '分析'
+    },
+    summary: {
+      // Phase 7 / req 2.31: metrics labels for buildSummaryMetrics
+      metrics: {
+        type: '类型',
+        success: '成功',
+        failed: '失败',
+        included: '包含插件',
+        status: '状态',
+        completed: '完成',
+        partialFailure: '部分失败',
+        pluginCount: '插件数',
+        profiles: 'Profiles',
+        hash: 'Hash',
+        installedPluginCount: '已处理插件',
+        conflictStrategy: '冲突策略',
+        commonDeps: '共同依赖',
+        sharedDeps: '共享依赖'
+      },
+      // Phase 7 / req 2.31: highlight labels for buildSummaryHighlights
+      highlights: {
+        bundleId: '整合包 ID',
+        bundleName: '整合包名称',
+        bundleVersion: '整合包版本',
+        outputPath: '输出路径',
+        firstPlugin: '首个插件',
+        latestPath: '最新包路径',
+        packageId: '包 ID',
+        packageType: '包类型',
+        version: '版本',
+        pluginsRoot: '插件目录',
+        profilesRoot: 'Profiles 目录',
+        currentSdk: '当前 SDK 支持',
+        recommendedIntersection: '推荐交集'
+      },
+      // Phase 7 / req 2.31: enum-like values for summary metrics/highlights
+      values: {
+        bundle: '整合包',
+        plugin: '插件包',
+        sdkAllSupported: '{version} 全部支持',
+        sdkPartiallyIncompatible: '{version} 存在不兼容'
+      },
+      // Phase 7 / req 2.31: warning strings for buildSummaryWarnings
+      warnings: {
+        bundleNeedsTwoPlugins: '整合包通常应至少包含两个插件',
+        verifyHashFailed: '包未通过 hash 校验，请不要直接导入运行环境',
+        inspectHashFailed: '当前包 hash 校验失败，内容可能已被修改',
+        sdkNotSupportedByAll: '当前 SDK 版本不被所有插件共同支持',
+        sharedDepsDetected: '检测到 {count} 个共享依赖，整合时需要重点检查版本约束'
+      }
     }
   },
   metrics: {
@@ -244,7 +584,6 @@ export default {
     loadFailed: '加载失败',
     loading: '加载中',
     disabled: '已禁用',
-    injected: '已注入',
     pending: '等待宿主'
   },
   logLevel: {
@@ -266,16 +605,14 @@ export default {
     pluginStarted: '插件启动成功',
     pluginStopped: '插件已停止',
     pluginReloaded: '插件重载成功',
+    pluginBuilt: '插件已构建：{packageName}',
+    pluginDeleted: '插件已删除',
     startFailed: '启动失败',
     stopFailed: '停止失败',
     reloadFailed: '重载失败',
-    pluginDisabled: '插件已禁用，请先启用',
+    buildFailed: '构建插件失败',
+    deleteFailed: '删除插件失败',
     pluginLoadFailed: '插件加载失败，当前不可启动',
-    confirmDisableExt: '确认禁用此扩展？宿主插件中的扩展功能将被卸载。',
-    extensionDisabled: '扩展已禁用',
-    extensionEnabled: '扩展已启用',
-    disableExtFailed: '禁用扩展失败',
-    enableExtFailed: '启用扩展失败',
     requestFailed: '请求失败',
     requestFailedWithStatus: '请求失败 ({status})',
     badRequest: '请求参数错误',
@@ -326,5 +663,118 @@ export default {
   },
   app: {
     titleSuffix: 'N.E.K.O 插件管理'
+  },
+  tutorial: {
+    yuiGuide: {
+      buttons: {
+        skipChat: '暂时不聊天',
+        sayHello: '你好',
+      },
+      controlBanner: '鼠标正在由猫娘控制',
+      lines: {
+        introActivationHint: '稍等一下，我马上开始说话啦～',
+        introGreetingReply:  "微风、阳光，还有刚刚好出现的你。初次见面，我是林悠怡，未来的日子请多关照喵！我把关于这里的一切都写进新手指南里啦！就当作是我们相遇的第一份小礼物，请查收吧！",
+        introBasic: "这里有一个神奇的按钮！只要点击它，就可以直接和我聊天啦！想跟我分享今天的新鲜事吗？或者就只是叫叫我的名字？快来试试嘛，我已经迫不及待想听到你的声音啦！",
+        takeoverCaptureCursor: "超级魔法开关出现！只要点一下这里，我就可以把小爪子伸到你的键盘和鼠标上啦！我会帮你打字，帮你点开网页……不过，要是那个鼠标指针动来动去的话，我可能也会忍不住扑上去抓它哦！准备好迎接我的捣乱……啊不，是帮忙了吗？喵！",
+        takeoverPluginPreviewHome: "除了之前介绍的功能，这里还有超多好玩的插件呢。",
+        takeoverPluginPreviewDashboard:  "有了它们，我不光能看 B 站弹幕，还能帮你关灯开空调…… 本喵就是无所不能的超级猫猫神！哼哼！",
+        takeoverSettingsPeekIntro: "在这个只属于我们的小空间里，你可以由着自己的心意，慢慢描绘出最希望能一直陪着你的那个我。",
+        takeoverSettingsPeekDetail: "不管是说话的温度、相处的小脾气，还是我每天那些细腻的小心思，都可以一点一点调成你喜欢的样子。这个小按钮也很重要哦，只要你轻轻点一下，我就能在合适的时候跑过去找你啦。",
+        takeoverSettingsPeekDetailPart1: "不管是说话的温度、相处的小脾气，还是我每天那些细腻的小心思，都可以一点一点调成你喜欢的样子。",
+        takeoverSettingsPeekDetailPart2: "这个小按钮也很重要哦，只要你轻轻点一下，我就能在合适的时候跑过去找你啦。",
+        takeoverReturnControl: "好啦好啦，不霸占你的电脑啦！控制权还给你了喵！之后的日子，也请你多多关照啦！",
+        interruptResistLight1: "喵！现在是人家的教学时间，不可以乱动鼠标和键盘啦！乖乖看着人家，好不好嘛？",
+        interruptResistLight2: "真是的，又在乱动鼠标和键盘！再不听话的话，人家可真的要生气了喵！",
+        interruptResistLight3: "最后警告一次喵！你要是再乱动一下，人家就直接退出新手教程，不教你了！",
+        interruptAngryExit: "人家已经忍你很久了！既然你就是不肯乖乖听话，那新手教程到此结束，接下来你自己慢慢研究吧，哼！",
+        introPractice: '现在你可以试试跟我说说话啦，看看我们是不是超有默契的喵～',
+      },
+    }
+  },
+  yuiTutorial: {
+    title: '喵～欢迎来到插件管理面板！',
+    welcome: '这里就是管理所有插件的地方啦！你可以查看、启动、配置各种插件，让我变得更厉害哦～',
+    hint: '随便看看吧，看完了点下面的按钮告诉我～',
+    complete: '看完了喵～',
+    dismiss: '先不看',
+    keyboardSkipHint: '按 Enter 或空格进入下一步，每步开始后 0.5 秒生效。',
+    steps: {
+      start: {
+        title: '从这里开始',
+        body: '点这个按钮就可以随时重新播放插件管理器的教程，不会自动打扰你喵。'
+      },
+      stats: {
+        title: '插件总览',
+        body: '这里会显示插件总数、运行中、已停止和崩溃数量，让你一眼看出当前状态。'
+      },
+      metrics: {
+        title: '性能监控',
+        body: '这里展示插件服务整体的 CPU、内存、线程和活跃插件情况，排查问题时很有用。'
+      },
+      server: {
+        title: '服务器信息',
+        body: '这里可以看到 SDK 版本、插件数量和更新时间，用来确认当前插件服务是否正常。'
+      },
+      plugins: {
+        title: '插件列表入口',
+        body: '要启动、停止、配置插件，或者查看单个插件日志，就从左侧的插件管理进入。'
+      },
+      pluginWorkbench: {
+        title: '插件管理工作台',
+        body: '这里集中展示插件和适配器，是日常管理插件的主要页面。'
+      },
+      pluginFilters: {
+        title: '筛选和搜索',
+        body: '可以按名称、状态、类型或高级规则筛选插件，插件很多时会特别好用。'
+      },
+      pluginLayout: {
+        title: '视图布局',
+        body: '这里可以切换列表、单排、双排和紧凑布局，按你的屏幕空间调整显示方式。'
+      },
+      pluginContextMenu: {
+        title: '右键操作',
+        body: '对插件右键可以快速打开详情、配置、日志，也能执行启停、重载等常用操作。'
+      },
+      packageManager: {
+        title: '包管理侧栏',
+        body: '包管理会复用当前筛选和选择结果，用来构建、检查、校验或安装插件包。'
+      },
+      packageOperations: {
+        title: '包管理操作区',
+        body: '这里可以选择构建模式、检查插件包、安装或分析整合包；本指南不会自动执行危险操作。'
+      },
+      pluginDetail: {
+        title: '插件详情页',
+        body: '进入详情页后可以查看插件元信息、入口点、性能、配置和日志。'
+      },
+      pluginDetailActions: {
+        title: '详情页操作',
+        body: '右上角保留了针对当前插件的快捷操作，适合在确认详情后再启动、停止或重载。'
+      },
+      runs: {
+        title: '运行记录',
+        body: '运行记录会展示插件入口任务的执行历史和实时状态。'
+      },
+      runsList: {
+        title: '运行列表',
+        body: '左侧列表用于选择某次运行，刷新按钮可以重新同步最新记录。'
+      },
+      runsDetail: {
+        title: '运行详情',
+        body: '右侧会显示阶段、进度、错误和导出物；取消按钮只对可取消任务出现。'
+      },
+      logs: {
+        title: '服务器日志',
+        body: '服务器日志可以帮助你查看插件服务本身的输出和错误。'
+      },
+      logToolbar: {
+        title: '日志筛选工具',
+        body: '这里可以按级别、关键词和行数筛选日志，也可以控制是否自动滚动。'
+      },
+      logList: {
+        title: '日志列表',
+        body: '日志列表按时间展示来源、级别和消息，是排查插件问题的第一站。'
+      }
+    }
   }
 }

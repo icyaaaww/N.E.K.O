@@ -11,6 +11,16 @@
 const chatContainer = document.getElementById('chat-container');
 const chatContentWrapper = document.getElementById('chat-content-wrapper');
 const toggleBtn = document.getElementById('toggle-chat-btn');
+const CHAT_MINIMIZED_YARN_BALL_ICON_SRC = '/static/assets/neko-idle/chat-minimized-yarn-ball-116.png';
+const CHAT_MINIMIZED_YARN_BALL_ICON_SRCSET = '/static/assets/neko-idle/chat-minimized-yarn-ball-116.png 1x, /static/assets/neko-idle/chat-minimized-yarn-ball-232.png 2x';
+
+function applyChatMinimizedYarnBallIcon(iconImg) {
+    if (!iconImg) return;
+    iconImg.src = CHAT_MINIMIZED_YARN_BALL_ICON_SRC;
+    iconImg.srcset = CHAT_MINIMIZED_YARN_BALL_ICON_SRCSET;
+    iconImg.style.imageRendering = 'auto';
+}
+const CHAT_MINIMIZED_SIZE_PX = 51;
 
 let isTransitioning = false;
 let applyChatContainerSize = null;
@@ -18,8 +28,11 @@ let restoreChatContainerSize = null;
 let getStoredChatContainerSize = null;
 
 // 移动端检测（与 live2d.js 的 isMobileWidth 一致：基于窗口宽度）
+// Electron Pet 窗口（index.html）永不进入手机模式：优先走 canonical 谓词
+//（live2d-core.js 定义的 window.isMobileWidth 已感知 __LANLAN_IS_ELECTRON_PET__）。
 function uiIsMobileWidth() {
-    return window.innerWidth <= 768;
+    if (typeof window.isMobileWidth === 'function') return window.isMobileWidth();
+    return !window.__LANLAN_IS_ELECTRON_PET__ && window.innerWidth <= 768;
 }
 
 function isCollapsed() {
@@ -307,7 +320,10 @@ function setupResizableChatContainer() {
         e.preventDefault();
     };
     // 绑定调整大小启动事件（仅 handle 上绑定 mousedown/touchstart）
-    resizeHandle.addEventListener('mousedown', startResize);
+    resizeHandle.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;
+        startResize(e);
+    });
     resizeHandle.addEventListener('touchstart', startResize, { passive: false });
 
     window.addEventListener('resize', () => {
@@ -419,13 +435,15 @@ if (toggleBtn) {
                 }
 
                 if (becomingCollapsed) {
-                    iconImg.src = '/static/icons/expand_icon_off.png';
+                    applyChatMinimizedYarnBallIcon(iconImg);
                     iconImg.alt = window.t ? window.t('common.expand') : '展开';
                     toggleBtn.title = window.t ? window.t('common.expand') : '展开';
                     // 折叠后执行回弹，避免位置越界
                     triggerExpandSnap();
                 } else {
                     iconImg.src = '/static/icons/expand_icon_off.png';
+                    iconImg.removeAttribute('srcset');
+                    iconImg.style.imageRendering = '';
                     iconImg.alt = window.t ? window.t('common.minimize') : '最小化';
                     toggleBtn.title = window.t ? window.t('common.minimize') : '最小化';
                     setTimeout(scrollToBottom, 300);
@@ -447,7 +465,7 @@ if (toggleBtn) {
             }
             if (willMinimize) {
                 const rect = chatContainer.getBoundingClientRect();
-                const targetSize = 50;
+                const targetSize = CHAT_MINIMIZED_SIZE_PX;
                 const scaleX = rect.width > 0 ? Math.min(1, targetSize / rect.width) : 1;
                 const scaleY = rect.height > 0 ? Math.min(1, targetSize / rect.height) : 1;
 
@@ -487,7 +505,7 @@ if (toggleBtn) {
                 }, transitionDuration);
             } else {
                 // 展开动画：从最小化尺寸过渡到完整尺寸
-                const targetSize = 50;
+                const targetSize = CHAT_MINIMIZED_SIZE_PX;
                 // 计算初始 scale（从最小尺寸到完整尺寸的逆向）
                 const storedSize = getStoredChatContainerSize ? getStoredChatContainerSize() : null;
                 const targetW = storedSize ? storedSize.width : 400;
@@ -554,7 +572,7 @@ if (toggleBtn) {
 
             if (isMinimized) {
                 // 刚刚最小化，显示展开图标（加号）
-                iconImg.src = '/static/icons/expand_icon_off.png';
+                applyChatMinimizedYarnBallIcon(iconImg);
                 iconImg.alt = window.t ? window.t('common.expand') : '展开';
                 toggleBtn.title = window.t ? window.t('common.expand') : '展开';
                 iconImg.style.width = '100%';
@@ -564,6 +582,8 @@ if (toggleBtn) {
             } else {
                 // 刚刚还原展开，显示最小化图标（减号）
                 iconImg.src = '/static/icons/expand_icon_off.png';
+                iconImg.removeAttribute('srcset');
+                iconImg.style.imageRendering = '';
                 iconImg.alt = window.t ? window.t('common.minimize') : '最小化';
                 toggleBtn.title = window.t ? window.t('common.minimize') : '最小化';
                 iconImg.style.width = '32px';
@@ -592,7 +612,7 @@ if (toggleBtn) {
         if (chatContainer.classList.contains('minimized')) {
             let iconImg = toggleBtn.querySelector('img');
             if (iconImg) {
-                iconImg.src = '/static/icons/expand_icon_on.png';
+                applyChatMinimizedYarnBallIcon(iconImg);
             }
         }
     });
@@ -601,7 +621,7 @@ if (toggleBtn) {
         if (chatContainer.classList.contains('minimized')) {
             let iconImg = toggleBtn.querySelector('img');
             if (iconImg) {
-                iconImg.src = '/static/icons/expand_icon_off.png';
+                applyChatMinimizedYarnBallIcon(iconImg);
             }
         }
     });
@@ -621,6 +641,10 @@ if (toggleBtn) {
     let dragRAFId = null; // 拖动时的 requestAnimationFrame ID
     let pendingDragClientX = 0; // 待处理的鼠标位置
     let pendingDragClientY = 0;
+
+    function isPrimaryMouseDrag(e) {
+        return !e || e.type.includes('touch') || e.button === 0;
+    }
 
     // 拖动回弹配置（多屏幕切换时使用）
     const CHAT_SNAP_CONFIG = {
@@ -642,6 +666,9 @@ if (toggleBtn) {
     };
 
     // 获取当前显示区域的尺寸（考虑多屏幕）
+    // 多屏下 workArea/display 可能大于实际窗口像素（窗口还未跟上屏幕切换），
+    // 直接用会导致聊天框被吸附到窗口外、被窗口边界裁切。
+    // 因此 clamp 边界始终以 window.innerWidth/innerHeight 为上限，workArea 仅用来取更保守值。
     async function getDisplayWorkAreaSize() {
         let width = window.innerWidth;
         let height = window.innerHeight;
@@ -650,11 +677,13 @@ if (toggleBtn) {
             try {
                 const currentDisplay = await window.electronScreen.getCurrentDisplay();
                 if (currentDisplay && currentDisplay.workArea) {
-                    width = currentDisplay.workArea.width || width;
-                    height = currentDisplay.workArea.height || height;
+                    const waW = currentDisplay.workArea.width;
+                    const waH = currentDisplay.workArea.height;
+                    if (Number.isFinite(waW) && waW > 0) width = Math.min(width, waW);
+                    if (Number.isFinite(waH) && waH > 0) height = Math.min(height, waH);
                 } else if (currentDisplay && currentDisplay.width && currentDisplay.height) {
-                    width = currentDisplay.width;
-                    height = currentDisplay.height;
+                    width = Math.min(width, currentDisplay.width);
+                    height = Math.min(height, currentDisplay.height);
                 }
             } catch (e) {
                 console.debug('[Chat Snap] 获取屏幕工作区域失败，使用窗口尺寸');
@@ -779,10 +808,10 @@ if (toggleBtn) {
 
     // 开始拖动的函数
     function startDrag(e, skipPreventDefault = false) {
+        if (!isPrimaryMouseDrag(e)) return false;
+
         isDragging = true;
         hasMoved = false;
-        // 设置全局拖拽标志，供 preload 等跳过昂贵操作
-        if (window.DragHelpers) window.DragHelpers.isDragging = true;
         dragStartedFromToggleBtn = (e.target === toggleBtn || toggleBtn.contains(e.target));
 
         // 获取初始鼠标/触摸位置
@@ -818,7 +847,7 @@ if (toggleBtn) {
         chatContainer.style.cursor = 'grabbing';
         if (chatHeader) chatHeader.style.cursor = 'grabbing';
 
-        // 开始拖动时，临时禁用按钮的 pointer-events（使用 live2d-ui-drag.js 中的共享工具函数）
+        // 开始拖动时，临时禁用按钮的 pointer-events（使用 avatar-ui-drag.js 中的共享工具函数）
         if (window.DragHelpers) {
             window.DragHelpers.disableButtonPointerEvents();
         }
@@ -827,6 +856,8 @@ if (toggleBtn) {
         if (!skipPreventDefault) {
             e.preventDefault();
         }
+
+        return true;
     }
 
     // 计算边界限制后的位移量
@@ -912,9 +943,6 @@ if (toggleBtn) {
             chatContainer.style.cursor = '';
             if (chatHeader) chatHeader.style.cursor = '';
 
-            // 清除全局拖拽标志
-            if (window.DragHelpers) window.DragHelpers.isDragging = false;
-
             // 拖拽结束后恢复按钮的 pointer-events
             if (window.DragHelpers) {
                 window.DragHelpers.restoreButtonPointerEvents();
@@ -947,6 +975,7 @@ if (toggleBtn) {
     if (chatHeader) {
         // 鼠标事件
         chatHeader.addEventListener('mousedown', (e) => {
+            if (e.button !== 0) return;
             if (!isCollapsed()) {
                 startDrag(e);
             }
@@ -964,6 +993,7 @@ if (toggleBtn) {
     if (toggleBtn) {
         // 鼠标事件
         toggleBtn.addEventListener('mousedown', (e) => {
+            if (e.button !== 0) return;
             // 使用 skipPreventDefault=true 来保留 click 事件
             startDrag(e, true);
             e.stopPropagation(); // 阻止事件冒泡到 chatContainer
@@ -982,6 +1012,7 @@ if (toggleBtn) {
             !!el.closest('textarea, input, button, select, a, [contenteditable]');
 
         textInputArea.addEventListener('mousedown', (e) => {
+            if (e.button !== 0) return;
             if (!isCollapsed() && !isInteractiveTarget(e.target)) {
                 startDrag(e);
             }
@@ -996,6 +1027,7 @@ if (toggleBtn) {
 
     // 折叠状态：点击容器（除了按钮）可以拖动或展开
     chatContainer.addEventListener('mousedown', (e) => {
+        if (e.button !== 0) return;
         if (isCollapsed()) {
             // 如果点击的是切换按钮，不启动拖动
             if (e.target === toggleBtn || toggleBtn.contains(e.target)) {
@@ -1026,8 +1058,13 @@ if (toggleBtn) {
     document.addEventListener('touchend', endDrag);
 
     // 屏幕切换后，确保对话框回弹到新屏幕内侧
+    // 延迟一帧：主进程 setBounds 到 renderer 的 innerWidth/innerHeight 刷新有几毫秒~一帧延迟，
+    // 立即 snap 会让 getDisplayWorkAreaSize 读到旧尺寸，把聊天框永久 clamp 到旧屏内侧
+    // （对照 live2d-core.js 中 _displayChangeHandler 的 rAF 包裹方式）
     window.addEventListener('electron-display-changed', () => {
-        snapChatContainerIntoScreen({ animate: true });
+        requestAnimationFrame(() => {
+            snapChatContainerIntoScreen({ animate: true });
+        });
     });
 
     // 窗口大小改变后，确保对话框回弹到屏幕内侧（包括折叠状态）
@@ -1046,8 +1083,17 @@ if (toggleBtn) {
 const sidebar = document.getElementById('sidebar');
 
 
-// --- 初始化 ---
-document.addEventListener('DOMContentLoaded', () => {
+async function initCommonUiAfterStorageBarrier() {
+    if (typeof window.waitForStorageLocationStartupBarrier === 'function') {
+        try {
+            await window.waitForStorageLocationStartupBarrier();
+        } catch (_) {}
+    } else if (window.__nekoStorageLocationStartupBarrier
+        && typeof window.__nekoStorageLocationStartupBarrier.then === 'function') {
+        try {
+            await window.__nekoStorageLocationStartupBarrier;
+        } catch (_) {}
+    }
 
     setupResizableChatContainer();
 
@@ -1068,12 +1114,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (isCollapsed()) {
             // 最小化状态，显示展开图标（加号）
-            iconImg.src = '/static/icons/expand_icon_off.png';
+            applyChatMinimizedYarnBallIcon(iconImg);
             iconImg.alt = window.t ? window.t('common.expand') : '展开';
             toggleBtn.title = window.t ? window.t('common.expand') : '展开';
         } else {
             // 展开状态，显示最小化图标（减号）
             iconImg.src = '/static/icons/expand_icon_off.png';
+            iconImg.removeAttribute('srcset');
+            iconImg.style.imageRendering = '';
             iconImg.alt = window.t ? window.t('common.minimize') : '最小化';
             toggleBtn.title = window.t ? window.t('common.minimize') : '最小化';
             scrollToBottom(); // 初始加载时滚动一次
@@ -1082,6 +1130,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // 确保自动滚动在页面加载后生效
     scrollToBottom();
+}
+
+// --- 初始化 ---
+document.addEventListener('DOMContentLoaded', () => {
+    initCommonUiAfterStorageBarrier();
 });
 
 // 监听 DOM 变化，确保新内容添加后自动滚动
@@ -1101,11 +1154,21 @@ if (chatContentWrapper) {
 // ========== Electron 全局快捷键接口 ==========
 // 以下接口供 Electron 主进程通过 IPC 调用，用于全局快捷键功能
 
+function blockNekoShortcutDuringTutorial(actionName) {
+    if (typeof window.isNekoShortcutBlockedByTutorial !== 'function'
+        || !window.isNekoShortcutBlockedByTutorial()) {
+        return false;
+    }
+    console.log('[Electron Shortcut] ' + actionName + ': blocked - tutorial active');
+    return true;
+}
+
 /**
  * 切换语音会话状态（开始/结束）
  * Electron 调用此接口来触发语音按钮的切换
  */
 window.toggleVoiceSession = function () {
+    if (blockNekoShortcutDuringTutorial('toggleVoiceSession')) return;
     // 获取浮动按钮的当前状态（Live2D / VRM / MMD）
     const micButton = window.live2dManager?._floatingButtons?.mic?.button
         || window.vrmManager?._floatingButtons?.mic?.button
@@ -1123,19 +1186,22 @@ window.toggleVoiceSession = function () {
 
 /**
  * 切换屏幕分享状态（开始/结束）
- * Electron 调用此接口来触发屏幕分享按钮的切换
+ * Electron 兼容入口；可见 UI 已并入语音控制按钮。
  */
 window.toggleScreenShare = function () {
-    // 获取浮动按钮的当前状态（Live2D / VRM / MMD）
-    const screenBtn = window.live2dManager?._floatingButtons?.screen?.button
-        || window.vrmManager?._floatingButtons?.screen?.button
-        || window.mmdManager?._floatingButtons?.screen?.button;
-    const isActive = screenBtn?.dataset.active === 'true';
+    if (blockNekoShortcutDuringTutorial('toggleScreenShare')) return;
+    // 屏幕共享浮动按钮槽位已被社交按钮顶替；可见入口并入语音控制按钮。
+    // 当前共享状态以隐藏的 #screenButton 的 .active class 为准。
+    const screenBtn = document.getElementById('screenButton');
+    const isActive = !!(screenBtn && screenBtn.classList.contains('active'));
+    const isStartPending = typeof window.isScreenSharingStartPending === 'function'
+        && window.isScreenSharingStartPending();
+    const isActiveOrPending = isActive || isStartPending;
     const isRecording = window.isRecording || false;
 
     // 屏幕分享仅在语音会话中有效
     // 如果尝试开启屏幕分享但语音会话未开启，显示提示并阻止操作
-    if (!isActive && !isRecording) {
+    if (!isActiveOrPending && !isRecording) {
         console.log('[Electron Shortcut] toggleScreenShare: blocked - voice session not active');
         if (typeof window.showStatusToast === 'function') {
             window.showStatusToast(
@@ -1148,11 +1214,11 @@ window.toggleScreenShare = function () {
 
     // 派发切换事件
     const event = new CustomEvent('live2d-screen-toggle', {
-        detail: { active: !isActive }
+        detail: { active: !isActiveOrPending }
     });
     window.dispatchEvent(event);
 
-    console.log('[Electron Shortcut] toggleScreenShare:', !isActive ? 'start' : 'stop');
+    console.log('[Electron Shortcut] toggleScreenShare:', !isActiveOrPending ? 'start' : 'stop');
 };
 
 /**
@@ -1160,6 +1226,7 @@ window.toggleScreenShare = function () {
  * Electron 调用此接口来触发截图按钮点击
  */
 window.triggerScreenshot = function () {
+    if (blockNekoShortcutDuringTutorial('triggerScreenshot')) return;
     // 语音会话中禁止截图（文本框处于禁用态时意味着用户处于语音会话中）
     if (window.isRecording) {
         console.log('[Electron Shortcut] triggerScreenshot: blocked - in voice session');

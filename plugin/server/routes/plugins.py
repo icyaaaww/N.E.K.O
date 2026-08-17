@@ -6,15 +6,21 @@ from typing import Optional
 from fastapi import APIRouter, Query
 
 from plugin.logging_config import get_logger
-from plugin.server.application.plugins import PluginLifecycleService, PluginQueryService
+from plugin.server.application.plugins import (
+    PluginLifecycleService,
+    PluginQueryService,
+    PluginRegistryService,
+)
 from plugin.server.domain.errors import ServerDomainError
 from plugin.server.infrastructure.auth import require_admin
 from plugin.server.infrastructure.error_mapping import raise_http_from_domain
+from plugin.server.lifecycle import ensure_plugin_messaging_started
 
 router = APIRouter()
 logger = get_logger("server.routes.plugins")
 query_service = PluginQueryService()
 lifecycle_service = PluginLifecycleService()
+registry_service = PluginRegistryService()
 
 
 @router.get("/plugin/status")
@@ -24,11 +30,10 @@ async def plugin_status(plugin_id: Optional[str] = Query(default=None)) -> dict[
     except ServerDomainError as error:
         raise_http_from_domain(error, logger=logger)
 
-
 @router.get("/plugins")
-async def list_plugins() -> dict[str, object]:
+async def list_plugins(locale: Optional[str] = Query(default=None)) -> dict[str, object]:
     try:
-        return await query_service.list_plugins()
+        return await query_service.list_plugins(locale=locale)
     except ServerDomainError as error:
         raise_http_from_domain(error, logger=logger)
 
@@ -36,7 +41,16 @@ async def list_plugins() -> dict[str, object]:
 @router.post("/plugin/{plugin_id}/start")
 async def start_plugin_endpoint(plugin_id: str, _: str = require_admin) -> dict[str, object]:
     try:
-        return await lifecycle_service.start_plugin(plugin_id)
+        await ensure_plugin_messaging_started()
+        return await lifecycle_service.start_plugin(plugin_id, persist_user_intent=True)
+    except ServerDomainError as error:
+        raise_http_from_domain(error, logger=logger)
+
+
+@router.post("/plugin/{plugin_id}/refresh")
+async def refresh_plugin_endpoint(plugin_id: str, _: str = require_admin) -> dict[str, object]:
+    try:
+        return await registry_service.refresh_plugin(plugin_id)
     except ServerDomainError as error:
         raise_http_from_domain(error, logger=logger)
 
@@ -44,7 +58,23 @@ async def start_plugin_endpoint(plugin_id: str, _: str = require_admin) -> dict[
 @router.post("/plugin/{plugin_id}/stop")
 async def stop_plugin_endpoint(plugin_id: str, _: str = require_admin) -> dict[str, object]:
     try:
-        return await lifecycle_service.stop_plugin(plugin_id)
+        return await lifecycle_service.stop_plugin(plugin_id, persist_user_intent=True)
+    except ServerDomainError as error:
+        raise_http_from_domain(error, logger=logger)
+
+
+@router.delete("/plugin/{plugin_id}")
+async def delete_plugin_endpoint(plugin_id: str, _: str = require_admin) -> dict[str, object]:
+    try:
+        return await lifecycle_service.delete_plugin(plugin_id)
+    except ServerDomainError as error:
+        raise_http_from_domain(error, logger=logger)
+
+
+@router.post("/plugins/refresh")
+async def refresh_plugins_endpoint(_: str = require_admin) -> dict[str, object]:
+    try:
+        return await registry_service.refresh_registry()
     except ServerDomainError as error:
         raise_http_from_domain(error, logger=logger)
 
@@ -67,23 +97,5 @@ async def reload_all_plugins_endpoint(_: str = require_admin) -> dict[str, objec
     """
     try:
         return await lifecycle_service.reload_all_plugins()
-    except ServerDomainError as error:
-        raise_http_from_domain(error, logger=logger)
-
-
-@router.post("/plugin/{ext_id}/extension/disable")
-async def disable_extension_endpoint(ext_id: str, _: str = require_admin) -> dict[str, object]:
-    """禁用 Extension：通知宿主进程卸载 Router"""
-    try:
-        return await lifecycle_service.disable_extension(ext_id)
-    except ServerDomainError as error:
-        raise_http_from_domain(error, logger=logger)
-
-
-@router.post("/plugin/{ext_id}/extension/enable")
-async def enable_extension_endpoint(ext_id: str, _: str = require_admin) -> dict[str, object]:
-    """启用 Extension：通知宿主进程重新注入 Router"""
-    try:
-        return await lifecycle_service.enable_extension(ext_id)
     except ServerDomainError as error:
         raise_http_from_domain(error, logger=logger)

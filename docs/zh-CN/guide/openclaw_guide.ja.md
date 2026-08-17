@@ -1,78 +1,72 @@
-# NEKO から QwenPaw に接続する方法
 
-## QwenPaw インストールガイド
+# N.E.K.O. を QwenPaw に接続する
 
-### ステップ 1：インストール
+N.E.K.O. は既存設定との互換性のため、QwenPaw 連携を引き続き **OpenClaw** と呼びます。このガイドの OpenClaw スイッチは、別プロセスで動作する QwenPaw サービスへ接続します。
 
-Python を手動で設定する必要はありません。1 行のコマンドで自動的にインストールが完了します。スクリプトは `uv`（Python パッケージマネージャー）をダウンロードし、仮想環境を作成し、QwenPaw 本体と依存関係をインストールします。Node.js とフロントエンド資産も含まれます。なお、一部のネットワーク環境や企業の権限制限下では利用できない場合があります。
+## 1. 配布元を確認してインストール
 
-macOS / Linux:
+現在の手順は [QwenPaw 公式リポジトリ](https://github.com/agentscope-ai/QwenPaw)で確認してください。以下のコマンドはリモートのインストールスクリプトをダウンロードして直接実行します。セキュリティポリシーで必要な場合は、先にスクリプトを確認してください。制限されたネットワークや管理対象端末では失敗することがあります。
+
+macOS / Linux：
 
 ```bash
 curl -fsSL https://qwenpaw.agentscope.io/install.sh | bash
 ```
 
-Windows（PowerShell）:
+Windows PowerShell：
 
 ```powershell
 irm https://qwenpaw.agentscope.io/install.ps1 | iex
 ```
 
-### ステップ 2：初期化
+インストーラーは `uv`、隔離環境、QwenPaw と依存関係を準備します。完了後は新しい terminal を開いてください。
 
-インストールが完了したら、新しいターミナルを開いて次を実行してください。
+## 2. 初期化
 
 ```bash
 qwenpaw init --defaults
 ```
 
-ここには親切な安全警告があります。QwenPaw は次のように明示します。
+承認前に QwenPaw のセキュリティ警告を読んでください。一つのローカル instance は、実行 account が利用できる file、command、credential にアクセスできます。信頼できないユーザー間で共有しないでください。
 
-> これはローカル環境で動作する個人アシスタントです。さまざまなチャンネルへの接続、コマンド実行、API 呼び出しが可能です。同じ QwenPaw インスタンスを複数人で共有すると、ファイル、コマンド、シークレットを含む同じ権限を共有することになります。
+![QwenPaw の初期化時セキュリティ通知](assets/openclaw_guide/image1.png)
 
-![Neko チャンネル有効化手順画像 1](assets/openclaw_guide/image1.png)
-
-続行するには、内容を理解したうえで `yes` を選択する必要があります。
-
-### ステップ 3：起動
+## 3. 起動と確認
 
 ```bash
 qwenpaw app
 ```
 
-起動に成功すると、ターミナルの最後の行に次が表示されます。
+既定の console は `http://127.0.0.1:8088/` です。terminal を動かしたまま、browser で開きます。表示できなければ、N.E.K.O. を有効にする前に QwenPaw の起動エラーを解消してください。
 
-```text
-INFO:     Uvicorn running on http://127.0.0.1:8088 (Press CTRL+C to quit)
-```
+認証とネットワーク境界を理解して設定するまでは、localhost の外へ公開しないでください。
 
-サービス起動後、`http://127.0.0.1:8088` にアクセスすると QwenPaw のコンソール画面が開きます。
+## 4. QwenPaw でモデルを設定
 
-## NEKO チャンネル設定：NEKO を QwenPaw に接続する
+QwenPaw console の model page を開き、provider と必要な credential を設定して保存します。その後 chat page で設定済み model を選びます。利用可能な provider／model 名はインストール中の QwenPaw version に依存するため、コピーされた一覧ではなく現在の UI を確認してください。
 
-初期化が完了すると、QwenPaw は自動的に設定ディレクトリを作成します。Windows の既定パスは `C:\Users\あなたのユーザー名\.qwenpaw`、macOS の既定パスは `~/.qwenpaw` です。すべての内蔵スキルも自動的に有効になります。
+![QwenPaw のモデル設定](assets/openclaw_guide/image2.png)
 
-そのパスを見つけてください。`.qwenpaw` は隠しフォルダなので、次の操作が必要です。
+## 5. 任意：executor persona
 
-- Windows ユーザーは、タスクバーからエクスプローラーを開き、`表示 > 表示` を選んで「隠しファイル」を表示してください。
-- macOS ユーザーは Finder を開き、ホームフォルダに移動してから `Command + Shift + .` を同時に押してください。
+同梱の[置換用 archive](assets/openclaw_guide/qwenpaw-executor-profile.zip)には、executor 向けの `SOUL.md`、`AGENTS.md`、`PROFILE.md` が含まれます。接続に必須ではなく、QwenPaw の挙動を変更します。
 
-用意してあるチャンネル設定ファイル `custom_channels` を `.qwenpaw` フォルダにコピーします。
+置換前に：
 
-[キャラクターフォルダ内のファイル](assets/openclaw_guide/%E6%9B%BF%E6%8D%A2%E5%86%85%E5%AE%B9.zip)を `.qwenpaw/workspaces/default` にコピーし、`BOOTSTRAP.md` を削除します。
+1. QwenPaw を停止し、`.qwenpaw/workspaces/default` を backup します。
+2. archive の内容を確認し、現在の workspace と比較します。
+3. 置換する意図のある file だけをコピーします。
 
-その後、ターミナルで `CTRL+C` を押して qwenpaw を終了し、再度 `qwenpaw app` を実行して再起動します。
+設定 directory は通常、Windows では `%USERPROFILE%\.qwenpaw`、macOS/Linux では `~/.qwenpaw` です。`BOOTSTRAP.md` の削除は、この任意 executor-profile 手順だけの一部であり、N.E.K.O. 接続には不要です。変更後に `qwenpaw app` を再起動します。
 
-次に、画像の手順に従って Neko チャンネルを有効化してください。
+## 6. N.E.K.O. で有効化
 
-![Neko チャンネル有効化手順画像 2](assets/openclaw_guide/image2.png)
+1. QwenPaw を起動したままにします。
+2. N.E.K.O. の paw／Agent panel を開きます。
+3. Agent master switch を有効にします。
+4. **OpenClaw** child switch を有効にします。
+5. availability check を待ちます。
 
-## 基本設定：モデル設定
+N.E.K.O. の既定接続先は `http://127.0.0.1:8088` です。QwenPaw が別 address を使う場合、N.E.K.O. の core 設定で `openclawUrl` を更新してから再試行します。
 
-モデルをクリックして DashScope を選択します。API Key に応じて別のモデルを選ぶこともできます。設定を開き、Alibaba Cloud Bailian API Key を入力して保存してください。
-
-![Neko チャンネル有効化手順画像 3](assets/openclaw_guide/image3.png)
-
-保存後、チャット画面に戻ると設定済みのモデルを選択できるようになります。
-
-N.E.K.O に戻れば openclaw を使えるようになります。
+現在の adapter は QwenPaw v2 console API と旧 agent-compatible API の両方を認識します。Availability check は version に応じて `/api/version` または `/api/agent/health` を確認し、一致する console／agent endpoint を使います。既定 console 構成では別の channel file は不要です。

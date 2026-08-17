@@ -1,12 +1,26 @@
 # -*- coding: utf-8 -*-
-"""
-OpenFang Agent 执行后端适配器
+# Copyright 2025-2026 Project N.E.K.O. Team
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-职责 (仅通信，不管进程):
-1. 通过 A2A API 下发任务
-2. 轮询任务状态
-3. API Key 下发与配置同步
-4. 健康检查 (仅检测连通性，不负责启停 — 启停由 Electron 管理)
+"""
+OpenFang agent execution backend adapter
+
+Responsibilities (communication only, no process management):
+1. Submit tasks via the A2A API
+2. Poll task status
+3. API key delivery and config sync
+4. Health checks (connectivity only; start/stop is managed by Electron)
 """
 
 import asyncio
@@ -22,27 +36,51 @@ from utils.config_manager import get_config_manager
 # OpenFang LLM proxy — 运行在 agent_server 上，补全 OpenAI 兼容性字段
 _LLM_PROXY_BASE_URL = f"http://127.0.0.1:{TOOL_SERVER_PORT}/openfang-llm-proxy"
 
+logger = logging.getLogger("openfang_adapter")
+
 # ── Provider 检测 ──────────────────────────────────────────
 # OpenFang 原生支持多种 provider: anthropic, openai, groq, gemini, deepseek, ollama 等
 # 根据用户配置的 agent API base_url 推断最合适的 provider 和是否需要 proxy
 
 def _detect_provider_info(base_url: str, model: str) -> dict:
     """
-    根据用户配置的 agent API 推断 OpenFang provider 和是否需要 LLM proxy。
+    Infer the OpenFang provider and whether an LLM proxy is needed from the user-configured agent API.
 
     Returns:
         {
             "provider": "openai" | "anthropic" | "gemini" | "deepseek" | "groq" | ...,
-            "needs_proxy": bool,      # 是否需要经过 LLM proxy（补全兼容性字段）
-            "effective_url": str,     # 给 OpenFang 的 base_url（proxy URL 或直连）
-            "api_key_env": str,       # 环境变量名 (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.)
+            "needs_proxy": bool,      # whether to go through the LLM proxy (fills compatibility fields)
+            "effective_url": str,     # base_url handed to OpenFang (proxy URL or direct)
+            "api_key_env": str,       # environment variable name (OPENAI_API_KEY, ANTHROPIC_API_KEY, etc.)
         }
     """
-    url_lower = base_url.lower()
-    model_lower = model.lower()
+    from urllib.parse import urlsplit
 
-    # Anthropic 原生 API — OpenFang 直接支持，无需 proxy
-    if "anthropic.com" in url_lower or "api.anthropic" in url_lower:
+    model_lower = model.lower()
+    try:
+        parsed = urlsplit(base_url)
+        host = (parsed.hostname or "").lower()
+        path = (parsed.path or "").lower()
+        port = parsed.port  # may raise ValueError for malformed ports
+    except Exception as exc:
+        logger.debug("[OpenFang] Failed to parse base_url %r: %s", base_url, exc)
+        host, path, port = "", "", None
+
+    def _host_matches(*domains: str) -> bool:
+        """Check if host exactly matches or is a subdomain of any given domain."""
+        return any(host == d or host.endswith(f".{d}") for d in domains)
+
+    # 已知的 OpenAI-compatible 代理/中转 -- 必须走 proxy, 跳过后续 model-name 启发式匹配
+    if _host_matches("openrouter.ai"):
+        return {
+            "provider": "openai",
+            "needs_proxy": True,
+            "effective_url": _LLM_PROXY_BASE_URL,
+            "api_key_env": "OPENAI_API_KEY",
+        }
+
+    # Anthropic 原生 API -- OpenFang 直接支持, 无需 proxy
+    if _host_matches("anthropic.com", "api.anthropic.com"):
         return {
             "provider": "anthropic",
             "needs_proxy": False,
@@ -50,8 +88,8 @@ def _detect_provider_info(base_url: str, model: str) -> dict:
             "api_key_env": "ANTHROPIC_API_KEY",
         }
 
-    # OpenAI 原生 API — OpenFang 直接支持，无需 proxy
-    if "api.openai.com" in url_lower:
+    # OpenAI 原生 API -- OpenFang 直接支持, 无需 proxy
+    if _host_matches("api.openai.com"):
         return {
             "provider": "openai",
             "needs_proxy": False,
@@ -60,7 +98,7 @@ def _detect_provider_info(base_url: str, model: str) -> dict:
         }
 
     # Groq
-    if "groq.com" in url_lower or "groq" in model_lower:
+    if _host_matches("groq.com", "api.groq.com") or "groq" in model_lower:
         return {
             "provider": "groq",
             "needs_proxy": False,
@@ -68,8 +106,25 @@ def _detect_provider_info(base_url: str, model: str) -> dict:
             "api_key_env": "GROQ_API_KEY",
         }
 
-    # Gemini / Google AI
-    if "generativelanguage.googleapis.com" in url_lower or "gemini" in model_lower:
+    # Gemini / Google AI -- 仅通过 hostname 白名单判定, 不用 model name 启发式
+    # (model 名含 "gemini" 但 host 不是 Google 的情况 = OpenAI-compatible 代理, 应走 fallback)
+    # Google 提供两种端点:
+    #   /v1beta/openai/ -- OpenAI 兼容 (Bearer token + OpenAI tools 格式) -> 用 openai provider
+    #   /v1beta         -- 原生 Gemini API (?key= 认证 + functionDeclarations) -> 用 gemini provider
+    _is_google_ai = _host_matches("generativelanguage.googleapis.com")
+    _normalized_path = path.rstrip("/")
+    if _is_google_ai and (
+        _normalized_path == "/v1beta/openai"
+        or _normalized_path.startswith("/v1beta/openai/")
+    ):
+        # OpenAI 兼容端点, 直连即可, 不需要 Gemini driver
+        return {
+            "provider": "openai",
+            "needs_proxy": False,
+            "effective_url": base_url,
+            "api_key_env": "GEMINI_API_KEY",
+        }
+    if _is_google_ai:
         return {
             "provider": "gemini",
             "needs_proxy": False,
@@ -78,7 +133,7 @@ def _detect_provider_info(base_url: str, model: str) -> dict:
         }
 
     # DeepSeek
-    if "deepseek.com" in url_lower or "deepseek" in model_lower:
+    if _host_matches("deepseek.com", "api.deepseek.com") or "deepseek" in model_lower:
         return {
             "provider": "deepseek",
             "needs_proxy": False,
@@ -86,10 +141,24 @@ def _detect_provider_info(base_url: str, model: str) -> dict:
             "api_key_env": "DEEPSEEK_API_KEY",
         }
 
-    # Ollama (local) — detect localhost, 127.0.0.1, 0.0.0.0, [::1]
-    _loopback_hosts = ("localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]")
-    _is_loopback = any(h in url_lower for h in _loopback_hosts)
-    if _is_loopback and ("11434" in url_lower or "ollama" in model_lower):
+    # Ollama -- detect by:
+    #   1. Loopback/LAN address + default port 11434
+    #   2. Loopback/LAN address + "ollama" in model name
+    #   3. URL path containing "/ollama" (reverse-proxy setups)
+    #   4. Default port 11434 on any host (strong Ollama signal)
+    _loopback_hosts = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+    _is_loopback = host in _loopback_hosts
+    # RFC1918 private ranges: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+    _is_lan = (
+        host.startswith("10.")
+        or host.startswith("192.168.")
+        or any(host.startswith(f"172.{i}.") for i in range(16, 32))
+    )
+    _is_local = _is_loopback or _is_lan
+    _has_ollama_port = port == 11434
+    _has_ollama_path = "/ollama" in path
+    _has_ollama_model = "ollama" in model_lower
+    if _has_ollama_port or _has_ollama_path or (_is_local and _has_ollama_model):
         return {
             "provider": "ollama",
             "needs_proxy": False,
@@ -107,7 +176,6 @@ def _detect_provider_info(base_url: str, model: str) -> dict:
         "api_key_env": "OPENAI_API_KEY",
     }
 
-logger = logging.getLogger("openfang_adapter")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -116,7 +184,7 @@ logger = logging.getLogger("openfang_adapter")
 
 @dataclass
 class OpenFangTaskStatus:
-    """A2A 任务状态快照"""
+    """A2A task status snapshot"""
     task_id: str
     status: str  # "pending" | "running" | "completed" | "failed" | "cancelled"
     result: Optional[str] = None
@@ -132,16 +200,16 @@ class OpenFangTaskStatus:
 
 class OpenFangAdapter:
     """
-    OpenFang A2A 适配器
+    OpenFang A2A adapter
 
-    接口约定 (与 ComputerUseAdapter / BrowserUseAdapter 对齐):
+    Interface contract (aligned with ComputerUseAdapter / BrowserUseAdapter):
     - is_available()             -> Dict[str, Any]
     - run_instruction(...)       -> Dict[str, Any]
     - cancel_running(...)        -> None
     - check_connectivity()       -> bool
 
-    本适配器 **不管理** OpenFang 进程生命周期。
-    进程由 Electron main process 管理，本层只做 HTTP 通信。
+    This adapter does **not** manage the OpenFang process lifecycle.
+    The process is managed by the Electron main process; this layer only does HTTP communication.
     """
 
     def __init__(self, base_url: Optional[str] = None):
@@ -164,7 +232,7 @@ class OpenFangAdapter:
     # ──────────────────────────────────────────
 
     def is_available(self) -> Dict[str, Any]:
-        """返回当前可用性状态 (与 ComputerUseAdapter 格式对齐)。"""
+        """Return the current availability status (format aligned with ComputerUseAdapter)."""
         return {
             "enabled": True,
             "ready": self.init_ok,
@@ -175,12 +243,12 @@ class OpenFangAdapter:
         }
 
     def get_tools_list(self) -> List[str]:
-        """返回 OpenFang 侧可用工具名称列表 (缓存)。"""
+        """Return the list of tool names available on the OpenFang side (cached)."""
         return list(self._cached_tools_list)
 
     def _compute_config_hash(self) -> str:
-        """计算当前 agent API 配置的 hash，用于检测变更。
-        注: get_model_api_config() 每次调用时从文件/内存重新读取，无缓存过期问题。
+        """Compute a hash of the current agent API config to detect changes.
+        Note: get_model_api_config() re-reads from file/memory on every call, so there is no cache staleness issue.
         """
         import hashlib
         cm = get_config_manager()
@@ -189,7 +257,7 @@ class OpenFangAdapter:
         return hashlib.md5(key_fields.encode()).hexdigest()
 
     async def _ensure_config_synced(self) -> None:
-        """每次执行任务前检查配置是否变化，有变化则重新同步到 OpenFang。"""
+        """Check whether the config changed before each task execution; re-sync to OpenFang if it did."""
         current_hash = self._compute_config_hash()
         if current_hash != self._last_synced_config_hash:
             logger.info("[OpenFang] Config change detected (hash %s → %s), re-syncing...",
@@ -214,10 +282,10 @@ class OpenFangAdapter:
         local_task_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        向 OpenFang 提交任务并等待结果。
+        Submit a task to OpenFang and wait for the result.
 
-        优先使用 POST /api/agents/{id}/message（直接路由到已注册的 neko-executor），
-        fallback 到 POST /a2a/tasks/send（可能路由到默认 assistant agent）。
+        Prefers POST /api/agents/{id}/message (routes directly to the registered neko-executor),
+        falling back to POST /a2a/tasks/send (may route to the default assistant agent).
         """
         try:
             # 检查配置是否变化，变化则重新同步
@@ -246,8 +314,8 @@ class OpenFangAdapter:
         self, instruction: str, timeout: float, local_task_id: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """
-        POST /api/agents/{id}/message — 直接给指定 agent 发消息。
-        同步阻塞直到 agent 完成。返回 None 表示此方式不可用。
+        POST /api/agents/{id}/message — send a message directly to the given agent.
+        Blocks synchronously until the agent finishes. Returns None if this method is unavailable.
         """
         agent_id = self._executor_agent_id
         if not agent_id:
@@ -395,7 +463,7 @@ class OpenFangAdapter:
         timeout: float,
         local_task_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """通过 A2A 协议提交任务（路由到 OpenFang 默认 agent）。"""
+        """Submit the task via the A2A protocol (routed to OpenFang's default agent)."""
         # OpenFang A2A reads message from request["params"]["message"]["parts"]
         # Must wrap in "params" object — NOT top-level "message" or "messages"
         task_payload = {
@@ -444,15 +512,15 @@ class OpenFangAdapter:
         }
 
     def register_local_task(self, local_id: str, remote_id: str) -> None:
-        """注册本地 task_id 到远程 OpenFang task_id 的映射，供 cancel 使用。"""
+        """Register the mapping from a local task_id to the remote OpenFang task_id, for use by cancel."""
         self._active_tasks[local_id] = remote_id
 
     def unregister_local_task(self, local_id: str) -> None:
-        """移除本地 task_id 映射。"""
+        """Remove the local task_id mapping."""
         self._active_tasks.pop(local_id, None)
 
     async def cancel_running(self, task_id: Optional[str] = None) -> None:
-        """取消正在运行的任务。task_id=None 时取消所有；提供 task_id 但未找到则 no-op。"""
+        """Cancel running tasks. task_id=None cancels all; a task_id that isn't found is a no-op."""
         if task_id is None:
             targets = list(self._active_tasks.values())
         elif task_id in self._active_tasks:
@@ -474,8 +542,8 @@ class OpenFangAdapter:
 
     def check_connectivity(self) -> bool:
         """
-        同步健康检查 (可在线程池中调用)。
-        仅检测连通性，不负责启停 — 启停是 Electron 的事。
+        Synchronous health check (callable from a thread pool).
+        Connectivity only; start/stop is Electron's job, not ours.
         """
         try:
             with httpx.Client(timeout=3.0) as client:
@@ -501,18 +569,18 @@ class OpenFangAdapter:
 
     async def sync_config(self) -> bool:
         """
-        将 NEKO 的 Agent LLM 配置推送到 OpenFang（三层保障）。
+        Push NEKO's agent LLM config to OpenFang (three layers of assurance).
 
-        根据用户配置自动检测 provider 类型：
-        - Anthropic/OpenAI/Groq/Gemini/DeepSeek → 直连（OpenFang 原生支持）
-        - OpenRouter/lanlan.app 等代理 → 经过 LLM proxy（修复兼容性问题）
+        Auto-detects the provider type from the user config:
+        - Anthropic/OpenAI/Groq/Gemini/DeepSeek → direct (natively supported by OpenFang)
+        - Proxies such as OpenRouter/lanlan.app → via the LLM proxy (fixes compatibility issues)
 
-        1. POST /api/providers/{provider}/key  — 运行时推送 API key
-        2. PUT  /api/providers/{provider}/url  — 运行时覆盖 base_url
-        3. 写 ~/.openfang/config.toml           — 设置 [default_model] + [provider_urls]
+        1. POST /api/providers/{provider}/key  — push the API key at runtime
+        2. PUT  /api/providers/{provider}/url  — override base_url at runtime
+        3. Write ~/.openfang/config.toml        — set [default_model] + [provider_urls]
         """
         cm = get_config_manager()
-        agent_cfg = cm.get_model_api_config('agent')
+        agent_cfg = await cm.aget_model_api_config('agent')
 
         api_key = (agent_cfg.get("api_key") or "").strip()
         base_url = (agent_cfg.get("base_url") or "").strip()
@@ -521,13 +589,19 @@ class OpenFangAdapter:
             logger.warning("[OpenFang] Agent model not configured, cannot sync")
             return False
 
-        if not api_key or not base_url:
-            logger.warning("[OpenFang] Agent API 未配置 (key=%s, url=%s), 跳过同步",
-                           "set" if api_key else "empty", "set" if base_url else "empty")
+        if not base_url:
+            logger.warning("[OpenFang] Agent API base_url 未配置, 跳过同步")
             return False
 
-        # 自动检测 provider 和是否需要 proxy
+        # 先检测 provider，再决定是否需要 api_key
+        # Ollama 等本地 provider 不需要 api_key（api_key_env 为空串）
         pinfo = _detect_provider_info(base_url, model)
+        if not api_key and pinfo.get("api_key_env"):
+            # 云端 provider 缺少 api_key，跳过同步
+            logger.warning("[OpenFang] Agent API key 未配置 (provider=%s), 跳过同步",
+                           pinfo["provider"])
+            return False
+
         self._provider_info = pinfo
         provider = pinfo["provider"]
         effective_url = pinfo["effective_url"]
@@ -540,60 +614,64 @@ class OpenFangAdapter:
         key_pushed = False
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                # (1) Push API key — 尝试推送到检测到的 provider
-                provider_key_url = f"{self.base_url}/api/providers/{provider}/key"
-                for payload in [
-                    {"key": api_key},
-                    {"api_key": api_key},
-                    {"key": api_key, "base_url": base_url, "model": model},
-                    api_key,  # plain string body
-                ]:
-                    try:
-                        if isinstance(payload, str):
-                            resp = await client.post(
-                                provider_key_url,
-                                content=payload,
-                                headers={**self._auth_headers(), "Content-Type": "text/plain"},
-                            )
-                        else:
-                            resp = await client.post(
-                                provider_key_url,
-                                json=payload,
-                                headers=self._auth_headers(),
-                            )
-                        if resp.status_code == 200:
-                            key_pushed = True
-                            logger.info("[OpenFang] API key synced to %s (format=%s): model=%s",
-                                        provider, type(payload).__name__, model)
-                            break
-                    except Exception as ep:
-                        logger.debug("[OpenFang] Key push attempt failed: %s", ep)
-
-                # 如果检测到的 provider push 失败，也尝试 openai（通用后备）
-                if not key_pushed and provider != "openai":
-                    for payload in [{"key": api_key}, api_key]:
+                # (1) Push API key — 本地 provider (api_key_env 为空) 跳过
+                if api_key and pinfo.get("api_key_env"):
+                    provider_key_url = f"{self.base_url}/api/providers/{provider}/key"
+                    for payload in [
+                        {"key": api_key},
+                        {"api_key": api_key},
+                        {"key": api_key, "base_url": base_url, "model": model},
+                        api_key,  # plain string body
+                    ]:
                         try:
                             if isinstance(payload, str):
                                 resp = await client.post(
-                                    f"{self.base_url}/api/providers/openai/key",
+                                    provider_key_url,
                                     content=payload,
                                     headers={**self._auth_headers(), "Content-Type": "text/plain"},
                                 )
                             else:
                                 resp = await client.post(
-                                    f"{self.base_url}/api/providers/openai/key",
+                                    provider_key_url,
                                     json=payload,
                                     headers=self._auth_headers(),
                                 )
                             if resp.status_code == 200:
                                 key_pushed = True
-                                logger.info("[OpenFang] API key synced to openai fallback")
+                                logger.info("[OpenFang] API key synced to %s (format=%s): model=%s",
+                                            provider, type(payload).__name__, model)
                                 break
-                        except Exception:
-                            pass
+                        except Exception as ep:
+                            logger.debug("[OpenFang] Key push attempt failed: %s", ep)
 
-                if not key_pushed:
-                    logger.warning("[OpenFang] All key push formats failed, relying on config.toml")
+                    # 如果检测到的 provider push 失败，也尝试 openai（通用后备）
+                    if not key_pushed and provider != "openai":
+                        for payload in [{"key": api_key}, api_key]:
+                            try:
+                                if isinstance(payload, str):
+                                    resp = await client.post(
+                                        f"{self.base_url}/api/providers/openai/key",
+                                        content=payload,
+                                        headers={**self._auth_headers(), "Content-Type": "text/plain"},
+                                    )
+                                else:
+                                    resp = await client.post(
+                                        f"{self.base_url}/api/providers/openai/key",
+                                        json=payload,
+                                        headers=self._auth_headers(),
+                                    )
+                                if resp.status_code == 200:
+                                    key_pushed = True
+                                    logger.info("[OpenFang] API key synced to openai fallback")
+                                    break
+                            except Exception as ep:
+                                logger.debug("[OpenFang] Fallback key push attempt failed: %s", ep)
+
+                    if not key_pushed:
+                        logger.warning("[OpenFang] All key push formats failed, relying on config.toml")
+                else:
+                    # 本地 provider 不需要 key, 跳过 key push
+                    logger.info("[OpenFang] Local provider %s, skipping API key push", provider)
 
                 # (2) Override provider base_url
                 push_url = effective_url  # proxy URL 或直连 URL
@@ -612,10 +690,10 @@ class OpenFangAdapter:
         except Exception as e:
             logger.error("[OpenFang] HTTP config sync failed: %s", e)
 
-        # (3) Write config.toml
+        # (3) Write config.toml（同步文件 IO，offload 到线程）
         file_written = False
         try:
-            self._write_openfang_model_config(api_key, base_url, model)
+            await asyncio.to_thread(self._write_openfang_model_config, api_key, base_url, model)
             file_written = True
         except Exception as e:
             logger.debug("[OpenFang] config.toml write failed (non-fatal): %s", e)
@@ -667,8 +745,8 @@ class OpenFangAdapter:
     @staticmethod
     def _write_openfang_model_config(api_key: str, base_url: str, model: str) -> None:
         """
-        确保 ~/.openfang/config.toml 包含 [default_model] 和 [provider_urls] 配置。
-        根据 provider 类型决定是否通过 proxy。
+        Ensure ~/.openfang/config.toml contains the [default_model] and [provider_urls] config.
+        Whether to go through the proxy is decided by the provider type.
         """
         import os, re
         home = os.environ.get("HOME") or os.environ.get("USERPROFILE") or ""
@@ -696,7 +774,9 @@ class OpenFangAdapter:
             f'[default_model]\n'
             f'provider = "{provider}"\n'
             f'model = "{model}"\n'
-            f'api_key = "{api_key}"\n'
+            # Do NOT persist the plaintext api_key to disk. OpenFang reads the
+            # key from the environment variable declared by api_key_env below.
+            f'# api_key is read from environment variable {api_key_env or "OPENAI_API_KEY"}\n'
         )
         if api_key_env:
             dm_block += f'api_key_env = "{api_key_env}"\n'
@@ -725,8 +805,14 @@ class OpenFangAdapter:
             content = content.rstrip() + "\n\n" + pu_block
 
         # --- Set env vars for this process (may be inherited by children) ---
-        os.environ["OPENAI_API_KEY"] = api_key
-        os.environ["NEKO_OPENFANG_KEY"] = api_key
+        # Expose the key under the provider-specific env var so OpenFang can
+        # read it from the environment instead of from a plaintext field in
+        # config.toml (e.g. ANTHROPIC_API_KEY, GEMINI_API_KEY, etc.).
+        # Only set the provider-specific var — don't unconditionally write
+        # OPENAI_API_KEY, which would pollute/clobber it for non-OpenAI
+        # providers.
+        if api_key_env:
+            os.environ[api_key_env] = api_key
 
         with open(config_path, "w", encoding="utf-8") as f:
             f.write(content)
@@ -741,9 +827,9 @@ class OpenFangAdapter:
     @staticmethod
     def _ensure_openfang_env_var(var_name: str, value: str) -> None:
         """
-        确保 OpenFang 进程能读到指定环境变量。
-        由于 OpenFang 由 Electron 启动（非 Python 子进程），os.environ 不可达。
-        写入 ~/.openfang/.env 文件 + 当前进程的 os.environ。
+        Ensure the OpenFang process can read the given environment variable.
+        Since OpenFang is started by Electron (not a Python subprocess), os.environ is unreachable.
+        Writes to the ~/.openfang/.env file + the current process's os.environ.
         """
         import os
         os.environ[var_name] = value
@@ -776,15 +862,15 @@ class OpenFangAdapter:
 
     async def push_agent_manifest(self, agent_config: Optional[Dict] = None) -> Optional[str]:
         """
-        向 OpenFang 注册一个无人格执行 Agent。
-        使用 TOML manifest 格式，明确指定 openai provider。
-        返回 agent_id 或 None。
+        Register a persona-free executor agent with OpenFang.
+        Uses the TOML manifest format and explicitly specifies the openai provider.
+        Returns the agent_id or None.
         """
         agent_config = agent_config or {}
 
         # 从 NEKO agent config 取 model 名称
         cm = get_config_manager()
-        neko_agent_cfg = cm.get_model_api_config('agent')
+        neko_agent_cfg = await cm.aget_model_api_config('agent')
         model_name = (agent_config.get("model") or neko_agent_cfg.get("model") or "").strip()
         if not model_name:
             logger.warning("[OpenFang] No model configured, cannot push agent manifest")
@@ -819,9 +905,9 @@ class OpenFangAdapter:
             f'temperature = 0.3\n'
             f'max_tokens = 4096\n'
         )
-        # 写 .env 供 Electron 下次重启注入 OpenFang 环境
+        # 写 .env 供 Electron 下次重启注入 OpenFang 环境（同步 IO，offload）
         if neko_api_key and api_key_env:
-            self._ensure_openfang_env_var(api_key_env, neko_api_key)
+            await asyncio.to_thread(self._ensure_openfang_env_var, api_key_env, neko_api_key)
         # base_url: proxy URL (需要兼容性修补) 或直连 URL (原生支持的 provider)
         manifest_toml += f'base_url = "{effective_url}"\n'
         print(f"[OpenFang DEBUG] manifest_toml:\n{manifest_toml}")
@@ -916,7 +1002,7 @@ class OpenFangAdapter:
             return None
 
     async def _find_agent_id_by_name(self, client: httpx.AsyncClient, name: str) -> Optional[str]:
-        """查询 OpenFang 已注册 agent 列表，按 name 匹配返回 id。"""
+        """Query OpenFang's registered agent list and return the id matched by name."""
         try:
             resp = await client.get(
                 f"{self.base_url}/api/agents",
@@ -940,7 +1026,7 @@ class OpenFangAdapter:
     async def _patch_agent_model(
         self, client: httpx.AsyncClient, agent_id: str, model: str, base_url: str
     ) -> None:
-        """PATCH /api/agents/{id} 更新 agent 的 model/provider 配置。"""
+        """PATCH /api/agents/{id} to update the agent's model/provider config."""
         pinfo = getattr(self, '_provider_info', None) or _detect_provider_info(base_url, model)
         patch_payload = {
             "model": {
@@ -966,7 +1052,7 @@ class OpenFangAdapter:
             logger.debug("[OpenFang] PATCH agent %s failed: %s", agent_id, e)
 
     async def fetch_tools_list(self) -> List[str]:
-        """从 OpenFang 拉取可用工具列表并缓存。"""
+        """Fetch the available tool list from OpenFang and cache it."""
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.get(
@@ -1000,7 +1086,7 @@ class OpenFangAdapter:
         interval: float = 1.0,
         timeout: float = 300.0,
     ) -> OpenFangTaskStatus:
-        """轮询任务状态直到完成/失败/超时。"""
+        """Poll task status until completion/failure/timeout."""
         elapsed = 0.0
 
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -1052,7 +1138,7 @@ class OpenFangAdapter:
 
     @staticmethod
     def _extract_result(task_data: Dict) -> str:
-        """从 A2A 任务响应中提取文本结果。"""
+        """Extract the text result from an A2A task response."""
         print(f"[OpenFang DEBUG] _extract_result input keys={list(task_data.keys())}")
         result_field = task_data.get("result")
         print(f"[OpenFang DEBUG] _extract_result 'result' field type={type(result_field).__name__}, value(500)={str(result_field)[:500]}")

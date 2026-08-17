@@ -1,15 +1,4 @@
-# 手動セットアップ
-
-あらゆるプラットフォームでの開発とカスタマイズ向けです。
-
-## 前提条件
-
-- Python 3.11（厳密に -- 3.12 以降は不可）
-- [uv](https://docs.astral.sh/uv/getting-started/installation/) パッケージマネージャー
-- Node.js（>=20.19）
-- Git
-
-## インストール
+# ソースからの手動セットアップ
 
 ```bash
 git clone https://github.com/Project-N-E-K-O/N.E.K.O.git
@@ -17,69 +6,28 @@ cd N.E.K.O
 uv sync
 ```
 
-## フロントエンドのビルド
+Python は 3.11 固定です。すべての Python module/script/test/temporary command は `uv run` 経由です。
 
-プロジェクトには `frontend/` 配下に2つのフロントエンドプロジェクトがあり、実行前にビルドが必要です。
+Frontend は repository root で `.\build_frontend.bat` または `./build_frontend.sh`。内蔵 Live2D asset（Yui Lolita / Yui Origin）を確認し、`npm ci` で plugin manager と shared React chat bundle を生成します。
 
-**推奨** -- プロジェクトルートから一括ビルドスクリプトを使用してください。これが公式にサポートされているビルド方法です：
-
-```bash
-# Windows
-build_frontend.bat
-
-# Linux / macOS
-./build_frontend.sh
-```
-
-手動で実行する場合は、スクリプトと同じコマンドを使用してください：
+通常の起動:
 
 ```bash
-cd frontend/react-neko-chat && npm install && npm run build && cd ../..
-cd frontend/plugin-manager && npm install && npm run build-only && cd ../..
+uv run python launcher.py
 ```
 
-## 起動
+launcher は ports、memory/main/agent、shutdown を調整し、service 起動前に staged cloud-save snapshot を適用します。報告 URL を使い、48911 を固定しないでください。
 
-必要なサーバーを別々のターミナルで起動します：
+診断の split mode:
 
 ```bash
-# ターミナル 1 -- メモリサーバー（必須）
-uv run python memory_server.py
-
-# ターミナル 2 -- メインサーバー（必須）
-uv run python main_server.py
-
-# ターミナル 3 -- エージェントサーバー（オプション）
-uv run python agent_server.py
+uv run python -m app.memory_server
+uv run python -m app.main_server
+uv run python -m app.agent_server
 ```
 
-## 設定
+Agent、hosted plugin、browser/computer-use は agent/tool が必要です。Split mode は launcher fallback/lifecycle を再現しません。
 
-1. ブラウザで `http://localhost:48911/api_key` を開きます
-2. Core API プロバイダーを選択します
-3. API キーを入力します
-4. 保存をクリックします
+Steam RemoteStorage path は Steam/desktop launcher で確認します。Shutdown は runtime changes を自動 stage しないため、Cloud Save Manager で upload 用 snapshot を準備します。
 
-または、起動前に環境変数を設定します：
-
-```bash
-export NEKO_CORE_API_KEY="sk-your-key"
-export NEKO_CORE_API="qwen"
-uv run python main_server.py
-```
-
-## 代替手段: pip install
-
-uv よりも pip を使用したい場合：
-
-```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python memory_server.py
-python main_server.py
-```
-
-## 確認
-
-`http://localhost:48911` を開きます -- キャラクターインターフェースが表示されるはずです。
+Main URL の `/api_key` で current Provider と credentials を設定し、connectivity check を実行します。Source mode は Docker API initialization variables を読みません。

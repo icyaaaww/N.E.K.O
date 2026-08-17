@@ -1,10 +1,11 @@
-# NEKO로 QwenPaw 연결하기
 
-## QwenPaw 설치 가이드
+# N.E.K.O.를 QwenPaw에 연결하기
 
-### 1단계: 설치
+N.E.K.O.는 기존 설정과의 호환성을 위해 QwenPaw 통합을 계속 **OpenClaw**라고 부릅니다. 이 안내서의 OpenClaw 스위치는 별도로 실행 중인 QwenPaw 서비스에 연결됩니다.
 
-Python을 수동으로 설정할 필요가 없습니다. 한 줄 명령으로 설치가 자동으로 완료됩니다. 스크립트가 `uv`(Python 패키지 관리자)를 자동으로 내려받고, 가상 환경을 만들고, QwenPaw와 의존성까지 설치합니다. Node.js와 프런트엔드 리소스도 함께 포함됩니다. 단, 일부 네트워크 환경이나 기업 권한 정책에서는 사용할 수 없을 수 있습니다.
+## 1. 출처 확인 및 설치
+
+현재 절차는 [QwenPaw 공식 저장소](https://github.com/agentscope-ai/QwenPaw)에서 확인하세요. 아래 명령은 원격 설치 스크립트를 다운로드해 바로 실행합니다. 보안 정책에서 요구한다면 먼저 스크립트를 검토하세요. 제한된 네트워크나 관리형 장치에서는 설치가 차단될 수 있습니다.
 
 macOS / Linux:
 
@@ -12,67 +13,60 @@ macOS / Linux:
 curl -fsSL https://qwenpaw.agentscope.io/install.sh | bash
 ```
 
-Windows (PowerShell):
+Windows PowerShell:
 
 ```powershell
 irm https://qwenpaw.agentscope.io/install.ps1 | iex
 ```
 
-### 2단계: 초기화
+설치 프로그램은 `uv`, 격리 환경, QwenPaw 및 종속성을 준비합니다. 설치 후 새 터미널을 여세요.
 
-설치가 끝나면 새 터미널을 열고 다음 명령을 실행하세요.
+## 2. 초기화
 
 ```bash
 qwenpaw init --defaults
 ```
 
-여기에는 친절한 보안 경고가 있습니다. QwenPaw는 다음 내용을 분명하게 알려줍니다.
+동의하기 전에 QwenPaw의 보안 경고를 읽으세요. 하나의 로컬 인스턴스는 실행 계정이 사용할 수 있는 파일, 명령 및 자격 증명에 접근할 수 있습니다. 서로 신뢰하지 않는 사용자가 인스턴스를 공유하지 않도록 하세요.
 
-> 이것은 로컬 환경에서 실행되는 개인 비서입니다. 여러 채널에 연결하고, 명령을 실행하고, API를 호출할 수 있습니다. 여러 사람이 같은 QwenPaw 인스턴스를 사용하면 파일, 명령, 비밀 정보를 포함한 동일한 권한을 함께 공유하게 됩니다.
+![QwenPaw 초기화 보안 알림](assets/openclaw_guide/image1.png)
 
-![Neko 채널 활성화 단계 이미지 1](assets/openclaw_guide/image1.png)
-
-계속하려면 내용을 이해했다는 뜻으로 `yes` 를 선택해야 합니다.
-
-### 3단계: 실행
+## 3. 시작 및 확인
 
 ```bash
 qwenpaw app
 ```
 
-정상적으로 시작되면 터미널 마지막 줄에 다음이 표시됩니다.
+기본 콘솔 주소는 `http://127.0.0.1:8088/`입니다. 터미널을 계속 실행한 상태로 브라우저에서 주소를 여세요. 페이지가 열리지 않으면 N.E.K.O.를 활성화하기 전에 QwenPaw 시작 오류부터 해결하세요.
 
-```text
-INFO:     Uvicorn running on http://127.0.0.1:8088 (Press CTRL+C to quit)
-```
+인증과 네트워크 경계를 이해하고 설정하기 전에는 localhost 밖으로 서비스를 노출하지 마세요.
 
-서비스가 시작된 뒤 `http://127.0.0.1:8088` 에 접속하면 QwenPaw 콘솔 화면을 볼 수 있습니다.
+## 4. QwenPaw에서 모델 설정
 
-## NEKO 채널 설정: NEKO를 QwenPaw에 연결하기
+QwenPaw 콘솔의 모델 페이지에서 provider를 선택하고 필요한 자격 증명을 입력해 저장합니다. 그런 다음 채팅 페이지에서 설정한 모델을 선택하세요. 사용 가능한 provider와 모델 이름은 설치된 QwenPaw 버전에 따라 달라지므로 복사된 목록 대신 현재 UI를 확인하세요.
 
-초기화가 끝나면 QwenPaw가 자동으로 설정 디렉터리를 만듭니다. Windows 기본 경로는 `C:\Users\사용자이름\.qwenpaw`, macOS 기본 경로는 `~/.qwenpaw` 입니다. 모든 내장 스킬도 기본으로 활성화됩니다.
+![QwenPaw 모델 설정](assets/openclaw_guide/image2.png)
 
-해당 경로를 찾으세요. `.qwenpaw` 는 숨김 폴더이므로 다음이 필요합니다.
+## 5. 선택 사항: 실행자 persona
 
-- Windows 사용자는 작업 표시줄에서 파일 탐색기를 열고 `보기 > 표시` 에서 숨김 항목을 표시해야 합니다.
-- macOS 사용자는 Finder를 열고 홈 폴더로 이동한 뒤 `Command + Shift + .` 를 동시에 누르세요.
+함께 제공되는 [교체 archive](assets/openclaw_guide/qwenpaw-executor-profile.zip)에는 실행자 지향 `SOUL.md`, `AGENTS.md`, `PROFILE.md`가 들어 있습니다. 이 단계는 연결에 필요하지 않으며 QwenPaw 동작을 변경합니다.
 
-준비해 둔 채널 설정 파일 `custom_channels` 를 `.qwenpaw` 폴더에 복사합니다.
+교체하기 전에:
 
-[캐릭터 폴더 안의 파일](assets/openclaw_guide/%E6%9B%BF%E6%8D%A2%E5%86%85%E5%AE%B9.zip)을 `.qwenpaw/workspaces/default` 로 복사하고 `BOOTSTRAP.md` 를 삭제합니다.
+1. QwenPaw를 중지하고 `.qwenpaw/workspaces/default`를 백업합니다.
+2. archive를 검사하고 현재 workspace와 비교합니다.
+3. 교체하려는 파일만 복사합니다.
 
-그다음 터미널에서 `CTRL+C` 를 눌러 qwenpaw를 종료하고, 다시 `qwenpaw app` 을 입력해 재시작합니다.
+기본 설정 directory는 보통 Windows의 `%USERPROFILE%\.qwenpaw` 또는 macOS/Linux의 `~/.qwenpaw`입니다. `BOOTSTRAP.md` 삭제는 이 선택적 실행자 프로필 절차의 일부일 뿐이며 N.E.K.O. 연결에는 필요하지 않습니다. 변경 후 `qwenpaw app`을 다시 시작하세요.
 
-이후 이미지의 단계에 따라 Neko 채널을 활성화하세요.
+## 6. N.E.K.O.에서 활성화
 
-![Neko 채널 활성화 단계 이미지 2](assets/openclaw_guide/image2.png)
+1. QwenPaw를 시작하고 계속 실행합니다.
+2. N.E.K.O.의 paw/Agent 패널을 엽니다.
+3. Agent master 스위치를 켭니다.
+4. **OpenClaw** 하위 스위치를 켭니다.
+5. 가용성 검사를 기다립니다.
 
-## 기본 설정: 모델 설정
+N.E.K.O.의 기본 주소는 `http://127.0.0.1:8088`입니다. QwenPaw가 다른 주소를 사용한다면 N.E.K.O. core 설정에서 `openclawUrl`을 변경한 뒤 다시 시도하세요.
 
-모델을 클릭한 뒤 DashScope를 선택하세요. API Key에 따라 다른 모델을 선택해도 됩니다. 설정을 열고 Alibaba Cloud Bailian API Key를 입력한 뒤 저장합니다.
-
-![Neko 채널 활성화 단계 이미지 3](assets/openclaw_guide/image3.png)
-
-저장한 뒤 채팅 화면으로 돌아가면 설정한 모델을 선택할 수 있습니다.
-
-이제 N.E.K.O 로 돌아가면 openclaw를 사용할 수 있습니다.
+현재 adapter는 QwenPaw v2 console API와 이전 agent-compatible API를 모두 인식합니다. 가용성 검사는 버전에 맞춰 `/api/version` 또는 `/api/agent/health`를 확인하고, 이후 일치하는 console 또는 agent endpoint를 사용합니다. 기본 console 구성에는 별도 channel 파일이 필요하지 않습니다.

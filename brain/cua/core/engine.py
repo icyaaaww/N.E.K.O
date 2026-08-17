@@ -1,3 +1,21 @@
+# Modifications Copyright 2025-2026 Project N.E.K.O. Team
+#
+# This file is derived from simular-ai/Agent-S
+# (https://github.com/simular-ai/Agent-S), licensed under the Apache License,
+# Version 2.0; see brain/cua/AGENT_LICENSE.txt. Modified by the Project N.E.K.O. Team.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import os
 
 import backoff
@@ -52,6 +70,7 @@ class LMMEngineOpenAI(LMMEngine):
                 base_url=self.base_url,
                 api_key=api_key,
                 temperature=temperature,
+                timeout=120.0,  # noqa: LLM_OUTPUT_BUDGET  # output budget is set per-call on the raw .chat.completions.create() (max_completion_tokens below); this sets the transport timeout (hang-guard for VLM GUI reasoning).
                 max_retries=0,
             )
         return (
@@ -188,6 +207,7 @@ class LMMEngineGemini(LMMEngine):
                 base_url=base_url,
                 api_key=api_key,
                 temperature=temperature,
+                timeout=120.0,  # noqa: LLM_OUTPUT_BUDGET  # output budget is set per-call on the raw .chat.completions.create() (max_completion_tokens below); this sets the transport timeout (hang-guard for VLM GUI reasoning).
                 max_retries=0,
             )
         # Use the temperature passed to generate, otherwise use the instance's temperature, otherwise default to 0.0
@@ -196,7 +216,7 @@ class LMMEngineGemini(LMMEngine):
             self.llm_client._client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                max_tokens=max_new_tokens if max_new_tokens else 4096,
+                max_completion_tokens=max_new_tokens if max_new_tokens else 4096,
                 temperature=temp,
                 extra_body=self.llm_client.extra_body or None,
                 **kwargs,
@@ -244,6 +264,7 @@ class LMMEngineOpenRouter(LMMEngine):
                 base_url=base_url,
                 api_key=api_key,
                 temperature=temperature,
+                timeout=120.0,  # noqa: LLM_OUTPUT_BUDGET  # output budget is set per-call on the raw .chat.completions.create() (max_completion_tokens below); this sets the transport timeout (hang-guard for VLM GUI reasoning).
                 max_retries=0,
             )
         # Use self.temperature if set, otherwise use the temperature argument
@@ -252,7 +273,7 @@ class LMMEngineOpenRouter(LMMEngine):
             self.llm_client._client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                max_tokens=max_new_tokens if max_new_tokens else 4096,
+                max_completion_tokens=max_new_tokens if max_new_tokens else 4096,
                 temperature=temp,
                 extra_body=self.llm_client.extra_body or None,
                 **kwargs,
@@ -308,6 +329,7 @@ class LMMEngineAzureOpenAI(LMMEngine):
                 azure_endpoint=azure_endpoint,
                 api_key=api_key,
                 api_version=api_version,
+                timeout=120.0,  # hang-guard; output budget is set per-call on .create() (max_completion_tokens)
             )
         # Use self.temperature if set, otherwise use the temperature argument
         set_call_type("agent_cua")
@@ -315,7 +337,7 @@ class LMMEngineAzureOpenAI(LMMEngine):
         completion = self.llm_client.chat.completions.create(
             model=self.model,
             messages=messages,
-            max_tokens=max_new_tokens if max_new_tokens else 4096,
+            max_completion_tokens=max_new_tokens if max_new_tokens else 4096,
             temperature=temp,
             **kwargs,
         )
@@ -370,6 +392,7 @@ class LMMEnginevLLM(LMMEngine):
                 base_url=base_url,
                 api_key=api_key,
                 temperature=temperature,
+                timeout=120.0,  # noqa: LLM_OUTPUT_BUDGET  # output budget is set per-call on the raw .chat.completions.create() (max_completion_tokens below); this sets the transport timeout (hang-guard for VLM GUI reasoning).
                 max_retries=0,
             )
         # Use self.temperature if set, otherwise use the temperature argument
@@ -379,7 +402,7 @@ class LMMEnginevLLM(LMMEngine):
         completion = self.llm_client._client.chat.completions.create(
             model=self.model,
             messages=messages,
-            max_tokens=max_new_tokens if max_new_tokens else 4096,
+            max_completion_tokens=max_new_tokens if max_new_tokens else 4096,
             temperature=temp,
             top_p=top_p,
             extra_body=merged_extra or None,
@@ -414,13 +437,14 @@ class LMMEngineHuggingFace(LMMEngine):
                 base_url=base_url,
                 api_key=api_key,
                 temperature=temperature,
+                timeout=120.0,  # noqa: LLM_OUTPUT_BUDGET  # output budget is set per-call on the raw .chat.completions.create() (max_completion_tokens below); this sets the transport timeout (hang-guard for VLM GUI reasoning).
                 max_retries=0,
             )
         return (
             self.llm_client._client.chat.completions.create(
                 model="tgi",
                 messages=messages,
-                max_tokens=max_new_tokens if max_new_tokens else 4096,
+                max_completion_tokens=max_new_tokens if max_new_tokens else 4096,
                 temperature=temperature,
                 extra_body=self.llm_client.extra_body or None,
                 **kwargs,
@@ -461,13 +485,14 @@ class LMMEngineParasail(LMMEngine):
                 base_url=base_url if base_url else "https://api.parasail.io/v1",
                 api_key=api_key,
                 temperature=temperature,
+                timeout=120.0,  # noqa: LLM_OUTPUT_BUDGET  # output budget is set per-call on the raw .chat.completions.create() (max_completion_tokens below); this sets the transport timeout (hang-guard for VLM GUI reasoning).
                 max_retries=0,
             )
         return (
             self.llm_client._client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                max_tokens=max_new_tokens if max_new_tokens else 4096,
+                max_completion_tokens=max_new_tokens if max_new_tokens else 4096,
                 temperature=temperature,
                 extra_body=self.llm_client.extra_body or None,
                 **kwargs,

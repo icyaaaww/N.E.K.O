@@ -1,47 +1,101 @@
 <template>
-  <div class="plugin-detail">
+  <div class="plugin-detail" data-yui-guide-id="plugin-detail-page">
     <!-- Loading 状态 -->
     <div v-if="loading" class="loading-container">
       <el-icon class="is-loading" :size="32"><Loading /></el-icon>
       <span>{{ $t('common.loading') }}</span>
     </div>
 
-    <el-card v-else-if="plugin">
+    <el-card v-else-if="plugin" data-yui-guide-id="plugin-detail-card">
       <template #header>
-        <div class="card-header">
-          <div class="header-left">
-            <el-button :icon="ArrowLeft" @click="goBack">{{ $t('common.back') }}</el-button>
-            <h2>{{ plugin.name }}</h2>
+        <div class="card-header" data-yui-guide-id="plugin-detail-header">
+          <div class="header-left" data-yui-guide-id="plugin-detail-title">
+            <el-button :icon="ArrowLeft" data-yui-guide-id="plugin-detail-back" @click="goBack">{{ $t('common.back') }}</el-button>
+            <h2>{{ pluginDisplayText.name }}</h2>
           </div>
-          <PluginActions :plugin-id="pluginId" />
+          <div data-yui-guide-id="plugin-detail-actions">
+            <PluginActions :plugin-id="pluginId" />
+          </div>
         </div>
       </template>
 
-      <el-tabs v-model="activeTab">
+      <el-tabs v-model="activeTab" data-yui-guide-id="plugin-detail-tabs">
+        <el-tab-pane v-if="displayedPanelSurfaces.length > 0" :label="$t('plugins.ui.panel')" name="panel">
+          <div class="surface-section" data-yui-guide-id="plugin-detail-panel">
+            <el-alert
+              v-if="surfaceWarnings.length > 0"
+              class="surface-warning"
+              type="warning"
+              show-icon
+              :closable="false"
+            >
+              <template #title>{{ $t('plugins.ui.surfaceWarnings') }}</template>
+              <ul class="surface-warning__list">
+                <li v-for="warning in surfaceWarnings" :key="`${warning.path}:${warning.code}:${warning.message}`">
+                  <code>{{ warning.path }}</code>
+                  <span>{{ warning.message }}</span>
+                </li>
+              </ul>
+            </el-alert>
+            <el-tabs v-if="displayedPanelSurfaces.length > 1" v-model="activePanelSurfaceId" type="border-card">
+              <el-tab-pane
+                v-for="surface in displayedPanelSurfaces"
+                :key="surface.id"
+                :label="surface.title || surface.id"
+                :name="surface.id"
+              >
+                <HostedSurfaceFrame :ref="(instance) => setPanelSurfaceFrameRef(surface.id, instance)" :plugin-id="pluginId" :surface="surface" :height="hostedSurfaceFrameHeight" @open-logs="openLogsTab" @message="relayHostedSurfaceMessageToStaticUi" />
+              </el-tab-pane>
+            </el-tabs>
+            <HostedSurfaceFrame v-else :ref="(instance) => setPanelSurfaceFrameRef(displayedPanelSurfaces[0]?.id || '', instance)" :plugin-id="pluginId" :surface="displayedPanelSurfaces[0]!" :height="hostedSurfaceFrameHeight" @open-logs="openLogsTab" @message="relayHostedSurfaceMessageToStaticUi" />
+          </div>
+        </el-tab-pane>
+
+        <el-tab-pane v-if="guideSurfaces.length > 0" :label="$t('plugins.ui.guide')" name="guide">
+          <div class="surface-section" data-yui-guide-id="plugin-detail-guide">
+            <el-alert
+              v-if="surfaceWarnings.length > 0"
+              class="surface-warning"
+              type="warning"
+              show-icon
+              :closable="false"
+            >
+              <template #title>{{ $t('plugins.ui.surfaceWarnings') }}</template>
+              <ul class="surface-warning__list">
+                <li v-for="warning in surfaceWarnings" :key="`${warning.path}:${warning.code}:${warning.message}`">
+                  <code>{{ warning.path }}</code>
+                  <span>{{ warning.message }}</span>
+                </li>
+              </ul>
+            </el-alert>
+            <el-tabs v-if="guideSurfaces.length > 1" v-model="activeGuideSurfaceId" type="border-card">
+              <el-tab-pane
+                v-for="surface in guideSurfaces"
+                :key="surface.id"
+                :label="surface.title || surface.id"
+                :name="surface.id"
+              >
+                <HostedSurfaceFrame :plugin-id="pluginId" :surface="surface" :height="hostedSurfaceFrameHeight" @open-logs="openLogsTab" @message="relayHostedSurfaceMessageToStaticUi" />
+              </el-tab-pane>
+            </el-tabs>
+            <HostedSurfaceFrame v-else :plugin-id="pluginId" :surface="guideSurfaces[0]!" :height="hostedSurfaceFrameHeight" @open-logs="openLogsTab" @message="relayHostedSurfaceMessageToStaticUi" />
+          </div>
+        </el-tab-pane>
+
         <el-tab-pane :label="$t('plugins.basicInfo')" name="info">
-          <div class="info-section">
+          <div class="info-section" data-yui-guide-id="plugin-detail-info">
             <el-descriptions :column="2" border>
               <el-descriptions-item :label="$t('plugins.id')">{{ plugin.id }}</el-descriptions-item>
               <el-descriptions-item :label="$t('plugins.version')">{{ plugin.version }}</el-descriptions-item>
-              <el-descriptions-item :label="$t('plugins.description')" :span="2">{{ plugin.description || $t('common.noData') }}</el-descriptions-item>
+              <el-descriptions-item :label="$t('plugins.description')" :span="2">{{ pluginDisplayText.description || $t('common.noData') }}</el-descriptions-item>
               <el-descriptions-item :label="$t('plugins.pluginType')">
                 <el-tag size="small" :type="pluginTypeTagType">
                   {{ $t(pluginTypeText) }}
                 </el-tag>
               </el-descriptions-item>
               <el-descriptions-item :label="$t('plugins.sdkVersion')">{{ plugin.sdk_version || $t('common.nA') }}</el-descriptions-item>
-              <el-descriptions-item v-if="isExtension" :label="$t('plugins.hostPlugin')">
-                <el-link type="primary" @click="goToPlugin(plugin.host_plugin_id!)">
-                  {{ plugin.host_plugin_id }}
-                </el-link>
-              </el-descriptions-item>
-              <el-descriptions-item v-if="!isExtension" :label="$t('plugins.enabled')">
-                <el-tag size="small" :type="plugin.enabled ? 'success' : 'info'">
-                  {{ plugin.enabled ? $t('plugins.enabled') : $t('plugins.disabled') }}
-                </el-tag>
-              </el-descriptions-item>
-              <el-descriptions-item v-if="!isExtension" :label="$t('plugins.autoStart')">
-                <el-tag size="small" :type="plugin.autoStart ? 'success' : 'warning'" :class="{ 'is-disabled': !plugin.enabled }">
+              <el-descriptions-item :label="$t('plugins.autoStart')">
+                <el-tag size="small" :type="plugin.autoStart ? 'success' : 'warning'">
                   {{ plugin.autoStart ? $t('plugins.autoStart') : $t('plugins.manualStart') }}
                 </el-tag>
               </el-descriptions-item>
@@ -50,43 +104,33 @@
               </el-descriptions-item>
             </el-descriptions>
 
-            <!-- 普通插件：显示绑定的 Extension 列表 -->
-            <div v-if="!isExtension && boundExtensions.length > 0" class="bound-extensions">
-              <h4 class="bound-extensions-title">{{ $t('plugins.boundExtensions') }} ({{ boundExtensions.length }})</h4>
-              <div class="bound-extensions-list">
-                <el-card
-                  v-for="ext in boundExtensions"
-                  :key="ext.id"
-                  shadow="hover"
-                  class="bound-ext-card"
-                  @click="goToPlugin(ext.id)"
-                >
-                  <div class="bound-ext-info">
-                    <span class="bound-ext-name">{{ ext.name }}</span>
-                    <StatusIndicator :status="ext.status || 'pending'" />
-                  </div>
-                  <p class="bound-ext-desc">{{ ext.description || $t('common.noData') }}</p>
-                </el-card>
-              </div>
-            </div>
           </div>
         </el-tab-pane>
 
         <el-tab-pane :label="$t('plugins.entries')" name="entries">
-          <EntryList :entries="plugin.entries || []" :plugin-id="pluginId" :plugin-status="pluginStatus" />
+          <div data-yui-guide-id="plugin-detail-entries">
+            <EntryList :entries="plugin.entries || []" :plugin-id="pluginId" :plugin-status="pluginStatus" />
+          </div>
         </el-tab-pane>
 
         <el-tab-pane :label="$t('plugins.performance')" name="metrics">
-          <MetricsCard :plugin-id="pluginId" />
+          <div data-yui-guide-id="plugin-detail-metrics">
+            <MetricsCard :plugin-id="pluginId" />
+          </div>
         </el-tab-pane>
 
         <el-tab-pane :label="$t('plugins.config')" name="config">
-          <PluginConfigEditor :plugin-id="pluginId" />
+          <div data-yui-guide-id="plugin-detail-config">
+            <PluginConfigEditor :plugin-id="pluginId" />
+          </div>
         </el-tab-pane>
 
         <el-tab-pane :label="$t('plugins.logs')" name="logs">
-          <LogViewer :plugin-id="pluginId" />
+          <div data-yui-guide-id="plugin-detail-logs">
+            <LogViewer :plugin-id="pluginId" />
+          </div>
         </el-tab-pane>
+
       </el-tabs>
     </el-card>
 
@@ -95,7 +139,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft, Loading } from '@element-plus/icons-vue'
 import { usePluginStore } from '@/stores/plugin'
@@ -106,39 +150,79 @@ import MetricsCard from '@/components/metrics/MetricsCard.vue'
 import PluginConfigEditor from '@/components/plugin/PluginConfigEditor.vue'
 import LogViewer from '@/components/logs/LogViewer.vue'
 import EmptyState from '@/components/common/EmptyState.vue'
+import HostedSurfaceFrame from '@/components/plugin/HostedSurfaceFrame.vue'
+import { getPluginUiSurfaceInfo } from '@/api/plugins'
+import { resolvePluginDisplayText, type PluginDisplayText } from '@/utils/pluginDisplay'
+import { useI18n } from 'vue-i18n'
+import type { PluginUiSurface, PluginUiWarning } from '@/types/api'
 
 const route = useRoute()
 const router = useRouter()
 const pluginStore = usePluginStore()
+const { locale } = useI18n()
 
 const pluginId = computed(() => route.params.id as string)
 const activeTab = ref('info')
 const loading = ref(true)
+const surfaces = ref<PluginUiSurface[]>([])
+const surfaceWarnings = ref<PluginUiWarning[]>([])
+const activePanelSurfaceId = ref('')
+const activeGuideSurfaceId = ref('')
+type SurfaceMessageReceiver = {
+  sendSurfaceMessage: (data: unknown) => void
+}
+const panelSurfaceFrameRefs = new Map<string, SurfaceMessageReceiver>()
+const hostedSurfaceFrameHeight = 'clamp(560px, calc(100vh - 220px), 1200px)'
+const allowedTabs = new Set(['panel', 'guide', 'ui', 'info', 'entries', 'metrics', 'config', 'logs'])
+let currentSurfaceLoadId = 0
 
 const plugin = computed(() => {
   return pluginStore.pluginsWithStatus.find(p => p.id === pluginId.value)
 })
 
-const isExtension = computed(() => plugin.value?.type === 'extension')
+const emptyPluginDisplayText: PluginDisplayText = {
+  name: '',
+  description: '',
+  shortDescription: '',
+}
+
+const pluginDisplayText = computed(() => {
+  return plugin.value ? resolvePluginDisplayText(plugin.value, locale.value) : emptyPluginDisplayText
+})
+
+const panelSurfaces = computed(() => surfaces.value.filter((surface) => surface.kind === 'panel'))
+const guideSurfaces = computed(() => surfaces.value.filter((surface) => surface.kind === 'guide' || surface.kind === 'docs'))
+const availablePanelSurfaces = computed(() => panelSurfaces.value.filter((surface) => surface.available !== false))
+// `auto` is accepted by the manifest but does not have a renderer yet. Do not
+// let its placeholder hide a working legacy static UI.
+const renderablePanelSurfaces = computed(() => availablePanelSurfaces.value.filter((surface) => surface.mode !== 'auto'))
+const availableDeclaredPanelSurfaces = computed(() => renderablePanelSurfaces.value.filter((surface) => !surface.legacy_static_compat))
+// Keep every renderable panel, including the host-generated static `main`
+// compatibility surface. The separate legacy "界面" tab is what gets hidden
+// when panels exist; filtering main here would make that page unreachable.
+const displayedPanelSurfaces = computed(() => renderablePanelSurfaces.value)
+// A generated static `main` is inserted before declared panels by the backend.
+// Keep it accessible in the list, but let generic `?tab=panel` entry points
+// select the first declared hosted panel when one exists.
+const defaultPanelSurface = computed(() => {
+  return availableDeclaredPanelSurfaces.value.find((surface) => surface.mode === 'hosted-tsx')
+    ?? availableDeclaredPanelSurfaces.value[0]
+    ?? displayedPanelSurfaces.value[0]
+})
+const hasDisplayablePanelSurface = computed(() => displayedPanelSurfaces.value.length > 0)
+
 const isAdapter = computed(() => plugin.value?.type === 'adapter')
 
 // 获取插件类型显示文本
 const pluginTypeText = computed(() => {
-  if (isExtension.value) return 'plugins.extension'
   if (isAdapter.value) return 'plugins.typeAdapter'
   return 'plugins.pluginTypeNormal'
 })
 
 // 获取插件类型标签颜色
 const pluginTypeTagType = computed(() => {
-  if (isExtension.value) return 'primary'
   if (isAdapter.value) return 'warning'
   return 'info'
-})
-
-const boundExtensions = computed(() => {
-  if (!plugin.value || isExtension.value) return []
-  return pluginStore.getExtensionsForHost(pluginId.value)
 })
 
 // 确保 status 始终是字符串类型
@@ -155,18 +239,199 @@ function goBack() {
   router.push('/plugins')
 }
 
-function goToPlugin(pid: string) {
-  router.push(`/plugins/${encodeURIComponent(pid)}`)
+function resolveActiveTab(value: unknown): string {
+  return typeof value === 'string' && allowedTabs.has(value) ? value : 'info'
+}
+
+function resolveDefaultTab(value: unknown): string {
+  const requested = resolveActiveTab(value)
+  if (requested === 'panel' && !hasDisplayablePanelSurface.value) return 'info'
+  if (requested === 'guide' && guideSurfaces.value.length === 0) return 'info'
+  if (requested === 'ui' && hasDisplayablePanelSurface.value) return 'panel'
+  if (requested === 'ui') return 'info'
+  return requested
+}
+
+function syncActiveTab(requestedTab: unknown) {
+  const nextTab = resolveDefaultTab(requestedTab)
+  activeTab.value = nextTab
+  if (requestedTab === 'ui' && nextTab !== 'ui') {
+    void router.replace({
+      query: {
+        ...route.query,
+        tab: nextTab,
+      },
+    })
+  }
+}
+
+function syncSurfaceTabs() {
+  const requestedSurfaceId = typeof route.query.surface === 'string' ? route.query.surface : ''
+  const requestedTab = resolveActiveTab(route.query.tab)
+  if (requestedSurfaceId) {
+    const panel = requestedTab !== 'guide'
+      ? displayedPanelSurfaces.value.find((surface) => surface.id === requestedSurfaceId)
+      : undefined
+    if (panel) {
+      activePanelSurfaceId.value = panel.id
+    }
+    const guide = requestedTab !== 'panel'
+      ? guideSurfaces.value.find((surface) => surface.id === requestedSurfaceId)
+      : undefined
+    if (guide) {
+      activeGuideSurfaceId.value = guide.id
+    }
+  }
+  if (!activePanelSurfaceId.value && defaultPanelSurface.value) {
+    activePanelSurfaceId.value = defaultPanelSurface.value.id
+  }
+  if (!activeGuideSurfaceId.value && guideSurfaces.value[0]) {
+    activeGuideSurfaceId.value = guideSurfaces.value[0].id
+  }
+}
+
+function openLogsTab() {
+  activeTab.value = 'logs'
+  router.replace({
+    query: {
+      ...route.query,
+      tab: 'logs',
+    },
+  })
+}
+
+function openHostedSurfaceFromStaticUi(payload: { pluginId?: string; surfaceId: string; kind?: string }) {
+  if (payload.pluginId && payload.pluginId !== pluginId.value) return
+  let activeSurfaceId = ''
+  const preferPanel = payload.kind === 'panel'
+  const preferGuide = payload.kind === 'guide' || payload.kind === 'docs'
+  const panel = (preferPanel || !preferGuide)
+    ? displayedPanelSurfaces.value.find((surface) => surface.id === payload.surfaceId)
+    : undefined
+  if (panel) {
+    activePanelSurfaceId.value = panel.id
+    activeSurfaceId = panel.id
+    activeTab.value = 'panel'
+  } else {
+    const guide = (preferGuide || !preferPanel)
+      ? guideSurfaces.value.find((surface) => surface.id === payload.surfaceId)
+      : undefined
+    if (!guide) return
+    activeGuideSurfaceId.value = guide.id
+    activeSurfaceId = guide.id
+    activeTab.value = 'guide'
+  }
+  router.replace({
+    query: {
+      ...route.query,
+      tab: activeTab.value,
+      surface: activeSurfaceId,
+    },
+  })
+}
+
+function isLegacyOpenSurfaceMessage(data: unknown): data is {
+  type: 'neko-study-open-surface'
+  payload: { pluginId?: string; surfaceId: string; kind?: string }
+} {
+  if (!data || typeof data !== 'object') return false
+  const message = data as { type?: unknown; payload?: unknown }
+  if (message.type !== 'neko-study-open-surface' || !message.payload || typeof message.payload !== 'object') return false
+  const payload = message.payload as { pluginId?: unknown; surfaceId?: unknown; kind?: unknown }
+  return typeof payload.surfaceId === 'string'
+    && (!payload.pluginId || typeof payload.pluginId === 'string')
+    && (!payload.kind || typeof payload.kind === 'string')
+}
+
+function setPanelSurfaceFrameRef(surfaceId: string, instance: unknown) {
+  if (!surfaceId) return
+  const receiver = instance as SurfaceMessageReceiver | null
+  if (receiver && typeof receiver.sendSurfaceMessage === 'function') {
+    panelSurfaceFrameRefs.set(surfaceId, receiver)
+  } else {
+    panelSurfaceFrameRefs.delete(surfaceId)
+  }
+}
+
+function relayHostedSurfaceMessageToStaticUi(data: unknown) {
+  if (isLegacyOpenSurfaceMessage(data)) {
+    openHostedSurfaceFromStaticUi(data.payload)
+    return
+  }
+  // Hosted surface messages have already been source/origin checked by the
+  // frame. Keep every mounted static panel current, including a `main` tab
+  // that is temporarily off-screen while a hosted surface is active. Static
+  // panels are the only legacy-UI iframe owners; do not mount a duplicate
+  // hidden relay for the same /ui/ document.
+  for (const surface of displayedPanelSurfaces.value) {
+    if (surface.mode === 'static') {
+      panelSurfaceFrameRefs.get(surface.id)?.sendSurfaceMessage(data)
+    }
+  }
+}
+
+async function fetchSurfaces(): Promise<boolean> {
+  const loadId = ++currentSurfaceLoadId
+  const currentPluginId = pluginId.value
+  try {
+    const info = await getPluginUiSurfaceInfo(currentPluginId, locale.value)
+    if (loadId !== currentSurfaceLoadId || currentPluginId !== pluginId.value) return false
+    surfaces.value = info.surfaces
+    surfaceWarnings.value = info.warnings
+  } catch (caught: any) {
+    if (loadId !== currentSurfaceLoadId || currentPluginId !== pluginId.value) return false
+    surfaces.value = []
+    surfaceWarnings.value = [{
+      path: 'plugin.ui',
+      code: 'surface_query_failed',
+      message: caught?.response?.data?.detail || caught?.message || String(caught),
+    }]
+  }
+  activePanelSurfaceId.value = ''
+  activeGuideSurfaceId.value = ''
+  syncSurfaceTabs()
+  return true
+}
+
+async function refreshPluginUi(): Promise<boolean> {
+  return fetchSurfaces()
 }
 
 onMounted(async () => {
   try {
     await pluginStore.fetchPlugins()
     await pluginStore.fetchPluginStatus(pluginId.value)
+    if (await refreshPluginUi()) syncActiveTab(route.query.tab)
     pluginStore.setSelectedPlugin(pluginId.value)
   } finally {
     loading.value = false
   }
+})
+
+watch(
+  () => [route.query.tab, route.query.surface],
+  ([tab]) => {
+    syncSurfaceTabs()
+    syncActiveTab(tab)
+  },
+)
+
+watch(pluginId, async () => {
+  loading.value = true
+  try {
+    await pluginStore.fetchPluginStatus(pluginId.value)
+    if (await refreshPluginUi()) syncActiveTab(route.query.tab)
+    pluginStore.setSelectedPlugin(pluginId.value)
+  } finally {
+    loading.value = false
+  }
+})
+
+watch(locale, () => {
+  if (!plugin.value) return
+  void refreshPluginUi().then((refreshed) => {
+    if (refreshed) syncActiveTab(route.query.tab)
+  })
 })
 </script>
 
@@ -215,51 +480,26 @@ onMounted(async () => {
   padding: 20px 0;
 }
 
-.bound-extensions {
-  margin-top: 24px;
+.surface-section {
+  padding: 16px 0;
 }
 
-.bound-extensions-title {
-  font-size: 15px;
-  font-weight: 600;
-  margin: 0 0 12px 0;
-  color: var(--el-text-color-primary);
+.surface-warning {
+  margin-bottom: 14px;
 }
 
-.bound-extensions-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 12px;
+.surface-warning__list {
+  margin: 6px 0 0;
+  padding-left: 18px;
 }
 
-.bound-ext-card {
-  cursor: pointer;
-  transition: all 0.2s;
+.surface-warning__list li {
+  line-height: 1.7;
 }
 
-.bound-ext-card:hover {
-  border-color: var(--el-color-primary);
+.surface-warning__list code {
+  margin-right: 8px;
+  color: var(--el-color-warning);
 }
 
-.bound-ext-info {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 4px;
-}
-
-.bound-ext-name {
-  font-weight: 600;
-  font-size: 14px;
-}
-
-.bound-ext-desc {
-  margin: 0;
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 </style>
-

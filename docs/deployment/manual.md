@@ -1,15 +1,6 @@
-# Manual Setup
+# Manual Source Setup
 
-For development and customization on any platform.
-
-## Prerequisites
-
-- Python 3.11 (exactly — not 3.12+)
-- [uv](https://docs.astral.sh/uv/getting-started/installation/) package manager
-- Node.js (>=20.19)
-- Git
-
-## Installation
+## Install
 
 ```bash
 git clone https://github.com/Project-N-E-K-O/N.E.K.O.git
@@ -17,69 +8,51 @@ cd N.E.K.O
 uv sync
 ```
 
-## Build Frontend
+Python is pinned to 3.11. Run every Python module, script, test, and temporary command through `uv run`.
 
-The project has two frontend projects under `frontend/` that must be built before running.
+## Build frontend assets
 
-**Recommended** — use the convenience script from the project root. This is the officially supported build path:
+From the repository root:
+
+```powershell
+.\build_frontend.bat
+```
 
 ```bash
-# Windows
-build_frontend.bat
-
-# Linux / macOS
 ./build_frontend.sh
 ```
 
-If you need to run the commands manually, they must match what the script does:
+Both scripts verify/unpack the built-in Live2D assets (Yui Lolita + Yui Origin), run `npm ci`, build `frontend/plugin-manager/dist/index.html`, and build `static/react/neko-chat/neko-chat-window.iife.js`.
+
+## Run normally
 
 ```bash
-cd frontend/react-neko-chat && npm install && npm run build && cd ../..
-cd frontend/plugin-manager && npm install && npm run build-only && cd ../..
+uv run python launcher.py
 ```
 
-## Running
+The launcher plans ports, starts memory/main/agent services, coordinates shutdown, and follows the desktop startup path more closely than split mode. It also applies any staged cloud-save snapshot before server startup. Open the URL it reports; 48911 is only the preferred main port.
 
-Start the required servers in separate terminals:
+## Diagnostic split mode
+
+Use separate terminals only to isolate services:
 
 ```bash
-# Terminal 1 — Memory server (required)
-uv run python memory_server.py
-
-# Terminal 2 — Main server (required)
-uv run python main_server.py
-
-# Terminal 3 — Agent server (optional)
-uv run python agent_server.py
+uv run python -m app.memory_server
+uv run python -m app.main_server
+uv run python -m app.agent_server
 ```
 
-## Configuration
+The main UI can load with memory and main, but Agent, hosted-plugin, browser/computer-use, and related capabilities require agent/tool. Split mode does not reproduce launcher fallback ports or coordinated lifecycle behavior.
 
-1. Open `http://localhost:48911/api_key` in your browser
-2. Select your Core API provider
-3. Enter your API key
-4. Click Save
+## Cloud-save notes
 
-Alternatively, set environment variables before starting:
+- Validate the Steam RemoteStorage path through Steam or the desktop launcher.
+- Main-server split mode can perform the fallback staged-snapshot import and notify memory to reload.
+- Shutdown does not automatically stage runtime changes. Use Cloud Save Manager to prepare/replace the per-character snapshot intended for upload.
+- On macOS source runs, only if Gatekeeper blocks the local unnotarized Steamworks libraries, launch from the repository root and apply the documented quarantine/signing workaround to the two `steamworks/*.dylib` files; do not run that workaround preemptively.
 
-```bash
-export NEKO_CORE_API_KEY="sk-your-key"
-export NEKO_CORE_API="qwen"
-uv run python main_server.py
-```
+## Configure and verify
 
-## Alternative: pip install
+Open `/api_key` on the reported main URL, select current Core/Assist providers, enter their credentials, and run the connectivity checks. Source mode does not consume Docker's API-initialization variables.
 
-If you prefer pip over uv:
-
-```bash
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python memory_server.py
-python main_server.py
-```
-
-## Verify
-
-Open `http://localhost:48911` — you should see the character interface.
+Use `/health` for startup diagnosis and [Local Embedding Model Assets](./embedding-models) when preparing optional vectors.

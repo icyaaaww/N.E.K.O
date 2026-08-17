@@ -1,3 +1,17 @@
+# Copyright 2025-2026 Project N.E.K.O. Team
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import asyncio
 import json
 import logging
@@ -400,7 +414,7 @@ class BrowserUseAdapter:
 
         # Fallback: Steam GeoIP (country only, no IP)
         try:
-            from main_routers.shared_state import get_steamworks
+            from utils.steam_state import get_steamworks
             sw = get_steamworks()
             if sw is not None:
                 raw = sw.Utils.GetIPCountry()
@@ -416,9 +430,37 @@ class BrowserUseAdapter:
         return None, None
 
     def cancel_running(self) -> None:
-        """Signal the currently running task to stop at the next step boundary."""
+        """Signal the currently running task to stop at the next step boundary.
+
+        This only flips the flag checked in ``_on_step_end``; if the agent is
+        stuck inside an LLM call, CDP round-trip, or page wait (i.e. between
+        steps), it will not wake up. For hard cancellation from an async
+        context, use :meth:`cancel` instead — it additionally rips the browser
+        session so every in-flight browser-use await fails fast with
+        ``ConnectionError`` and lands in the disconnect handler.
+        """
         self._cancelled = True
         logger.info("[BrowserUse] cancel_running called, task will abort at next step")
+
+    async def cancel(self, *, close_timeout: float = 12.0) -> None:
+        """Hard-cancel: flip flag + tear down CDP so all pending awaits fail fast.
+
+        Safe to call concurrently with an in-progress ``run_instruction``. The
+        in-flight dispatch's exception handler will observe the CDP teardown,
+        clean up, and return a failure result (or raise ``CancelledError`` if
+        the wrapping task was also cancelled).
+        """
+        self._cancelled = True
+        if self._browser_session is None:
+            return
+        try:
+            await asyncio.wait_for(self._close_browser(), timeout=close_timeout)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[BrowserUse] cancel: _close_browser timed out after %.1fs", close_timeout
+            )
+        except Exception as exc:
+            logger.warning("[BrowserUse] cancel: _close_browser raised: %s", exc)
 
     def is_available(self) -> Dict[str, Any]:
         ready = self._ready_import
@@ -470,7 +512,8 @@ class BrowserUseAdapter:
         api_cfg = self._config_manager.get_model_api_config("agent")
         model = api_cfg.get("model", "") or ""
         base_url = api_cfg.get("base_url", "") or ""
-        return f"{base_url}|{model}"
+        provider_type = str(api_cfg.get("provider_type") or "openai_compatible").strip().lower()
+        return f"{provider_type}|{base_url}|{model}"
 
     def _get_mode_order(self, api_sig: str) -> List[str]:
         with _API_MODE_CACHE_LOCK:
@@ -553,17 +596,40 @@ class BrowserUseAdapter:
         ))
 
     def _build_llm(self, mode: str = "schema") -> Any:
-        """Build a browser-use compatible ChatOpenAI instance.
+        """Build a browser-use client matching the configured wire protocol.
 
         For Gemini-compatible endpoints, strips parameters that the API
         rejects (``frequency_penalty``, ``seed``, ``service_tier``).
         A thin wrapper class is used so the constraint survives any
         internal copy / re-init performed by browser-use.
         """
-        from browser_use.llm import ChatOpenAI as BUChatOpenAI
+        from utils.llm_client import (
+            _is_anthropic_endpoint,
+            _is_kimi_code_anthropic_base_url,
+            _normalize_anthropic_sdk_base_url,
+        )
+
         api_cfg = self._config_manager.get_model_api_config("agent")
         base_url = api_cfg.get("base_url", "") or ""
         model = api_cfg.get("model", "") or ""
+        provider_type = str(api_cfg.get("provider_type") or "openai_compatible").strip().lower()
+
+        if _is_anthropic_endpoint(base_url, provider_type):
+            from browser_use.llm import ChatAnthropic as BUChatAnthropic
+
+            default_headers: Dict[str, str] = {}
+            if _is_kimi_code_anthropic_base_url(base_url):
+                default_headers["User-Agent"] = "claude-code/0.1.0"
+            return BUChatAnthropic(
+                model=model,
+                api_key=api_cfg.get("api_key"),
+                base_url=_normalize_anthropic_sdk_base_url(base_url),
+                temperature=0.0,
+                default_headers=default_headers or None,
+            )
+
+        from browser_use.llm import ChatOpenAI as BUChatOpenAI
+
         is_gemini = self._is_gemini_compatible_endpoint(base_url)
         kwargs: Dict[str, Any] = dict(
             model=model,
@@ -584,7 +650,10 @@ class BrowserUseAdapter:
             kwargs["frequency_penalty"] = None
             kwargs["seed"] = None
             kwargs["service_tier"] = None
-        return BUChatOpenAI(**kwargs)
+        # noqa: LLM_OUTPUT_BUDGET — browser-use's own ChatOpenAI; the browser-use
+        # agent drives its own multi-step LLM lifecycle, so token budget / timeout
+        # are owned by that library and forcing ours here would break its loop.
+        return BUChatOpenAI(**kwargs)  # noqa: LLM_OUTPUT_BUDGET
 
     async def _cdp_eval_on_page(self, session: Any, js: str) -> None:
         """Evaluate JS on the currently focused page via CDP Runtime.evaluate.
@@ -694,7 +763,7 @@ class BrowserUseAdapter:
 
         from browser_use import Agent
 
-        ok, info = self._config_manager.consume_agent_daily_quota(
+        ok, info = await self._config_manager.aconsume_agent_daily_quota(
             source="browser_use.run_instruction",
             units=1,
         )
@@ -911,10 +980,22 @@ class BrowserUseAdapter:
             except asyncio.CancelledError:
                 logger.info("[BrowserUse] Task cancelled by user")
                 if browser_session:
-                    await self._remove_overlay(browser_session)
+                    try:
+                        await self._remove_overlay(browser_session)
+                    except Exception as overlay_err:
+                        # CDP may already be torn down by _close_browser() — the
+                        # overlay is cosmetic and failing to remove it must not
+                        # mask the cancellation.
+                        logger.debug(
+                            "[BrowserUse] overlay removal during cancel failed: %s",
+                            overlay_err,
+                        )
                 if session_id and session_id in self._agents:
                     del self._agents[session_id]
-                return {"success": False, "error": "Task cancelled by user"}
+                # Re-raise so the dispatch wrapper hits its CancelledError branch
+                # and marks the task as "cancelled" (not "failed"). Swallowing
+                # cancels here caused the HUD to show a cancel as a failure.
+                raise
             except asyncio.TimeoutError:
                 logger.warning("[BrowserUse] Task timed out after %ss", timeout_s)
                 if browser_session:
@@ -990,10 +1071,10 @@ class BrowserUseAdapter:
                 await asyncio.wait_for(self._browser_session.stop(), timeout=10)
             except asyncio.TimeoutError:
                 logger.warning("[BrowserUse] _browser_session.stop() timed out after 10s")
-                self._force_kill_browser(browser_pid)
+                await asyncio.to_thread(self._force_kill_browser, browser_pid)
             except Exception as exc:
                 logger.warning("[BrowserUse] _browser_session.stop() raised: %s", exc)
-                self._force_kill_browser(browser_pid)
+                await asyncio.to_thread(self._force_kill_browser, browser_pid)
 
             self._browser_session = None
         self._session_ever_started = False

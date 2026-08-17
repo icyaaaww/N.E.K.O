@@ -1,10 +1,11 @@
-# 使用 NEKO 接入 QwenPaw
 
-## QwenPaw 安裝指南
+# 將 N.E.K.O. 接入 QwenPaw
 
-### 第一步：安裝
+為相容既有設定，N.E.K.O. 仍將 QwenPaw 整合稱為 **OpenClaw**。本指南中的 OpenClaw 開關會連線到另外執行的 QwenPaw 服務。
 
-無需手動配置 Python，一行指令即可自動完成安裝。腳本會自動下載 `uv`（Python 套件管理器）、建立虛擬環境、安裝 QwenPaw 及其依賴（包含 Node.js 和前端資源）。注意：部分網路環境或企業權限管控下可能無法使用。
+## 1. 核對來源並安裝
+
+請以 [QwenPaw 官方儲存庫](https://github.com/agentscope-ai/QwenPaw)的目前說明為準。以下命令會下載並直接執行遠端安裝腳本；若安全政策有要求，請先審閱腳本。受限網路或受管裝置可能阻止安裝。
 
 macOS / Linux：
 
@@ -12,67 +13,60 @@ macOS / Linux：
 curl -fsSL https://qwenpaw.agentscope.io/install.sh | bash
 ```
 
-Windows（PowerShell）：
+Windows PowerShell：
 
 ```powershell
 irm https://qwenpaw.agentscope.io/install.ps1 | iex
 ```
 
-### 第二步：初始化
+安裝程式會準備 `uv`、隔離環境、QwenPaw 及其相依套件。完成後請開啟新的終端機。
 
-安裝完成後，請開啟新終端並執行：
+## 2. 初始化
 
 ```bash
 qwenpaw init --defaults
 ```
 
-這裡有個很貼心的設計，就是安全警告。QwenPaw 會明確告訴你：
+接受前請閱讀 QwenPaw 顯示的安全提示。同一個本機執行個體能存取其執行帳戶可用的檔案、命令及憑證；不要讓互不信任的使用者共用。
 
-> 這是一個執行在你本機環境中的個人助理，可以連接各種通道、執行命令、呼叫 API。如果讓多個人共用同一個 QwenPaw 實例，他們將共享相同的權限（檔案、命令、金鑰）。
+![QwenPaw 初始化安全提示](assets/openclaw_guide/image1.png)
 
-![啟用 Neko 頻道步驟圖 1](assets/openclaw_guide/image1.png)
-
-你需要選擇 `yes` 確認已理解後才能繼續。
-
-### 第三步：啟動
+## 3. 啟動並確認
 
 ```bash
 qwenpaw app
 ```
 
-啟動成功後，終端最後一行會出現：
+預設主控台位址是 `http://127.0.0.1:8088/`。保持終端機執行，並在瀏覽器開啟該位址。若頁面無法載入，請先處理 QwenPaw 啟動錯誤，再啟用 N.E.K.O.。
 
-```text
-INFO:     Uvicorn running on http://127.0.0.1:8088 (Press CTRL+C to quit)
-```
+除非已了解並設定驗證與網路邊界，否則不要將服務暴露到 localhost 之外。
 
-服務啟動後，造訪 `http://127.0.0.1:8088`，即可看到 QwenPaw 的控制台介面。
+## 4. 在 QwenPaw 中設定模型
 
-## NEKO 頻道配置：讓 NEKO 接入 QwenPaw
+在 QwenPaw 主控台開啟模型頁面，選擇 provider，填入所需憑證並儲存；再回到聊天頁選擇已設定的模型。可用 provider 與模型名稱由目前安裝的 QwenPaw 版本決定，請以即時介面為準，不要依賴複製的清單。
 
-初始化完成後，QwenPaw 會自動建立配置檔目錄。Windows 預設在 `C:\Users\你的使用者名稱\.qwenpaw`，mac 預設在 `~/.qwenpaw`，並啟用所有內建技能。
+![QwenPaw 模型設定頁面](assets/openclaw_guide/image2.png)
 
-找到該路徑。因為 `.qwenpaw` 是隱藏資料夾：
+## 5. 選用：執行器人設
 
-- Windows 使用者需要從工作列開啟「檔案總管」，選擇「檢視 > 顯示」，然後勾選「隱藏的項目」以查看隱藏的檔案和資料夾。
-- mac 使用者需要開啟 Finder，進入主資料夾後，同時按下 `Command + Shift + .`
+隨文件提供的[替換檔案包](assets/openclaw_guide/qwenpaw-executor-profile.zip)包含 `SOUL.md`、`AGENTS.md` 與 `PROFILE.md`，可用於偏執行器的人設。此步驟不是連線 N.E.K.O. 的必要條件，而且會改變 QwenPaw 行為。
 
-將我們準備好的頻道配置檔 `custom_channels` 複製到 `.qwenpaw` 資料夾中。
+替換前：
 
-將[人設資料夾中的檔案](assets/openclaw_guide/%E6%9B%BF%E6%8D%A2%E5%86%85%E5%AE%B9.zip)複製到 `.qwenpaw/workspaces/default` 中，並刪除 `BOOTSTRAP.md`。
+1. 停止 QwenPaw，並備份 `.qwenpaw/workspaces/default`；
+2. 檢查壓縮檔內容，與目前 workspace 比較；
+3. 只複製確認要替換的檔案。
 
-然後在終端按 `CTRL+C` 結束 qwenpaw，再輸入 `qwenpaw app` 重新啟動。
+設定目錄通常位於 Windows 的 `%USERPROFILE%\.qwenpaw`，或 macOS/Linux 的 `~/.qwenpaw`。刪除 `BOOTSTRAP.md` 只屬於這套選用執行器人設流程，並非連線 N.E.K.O. 的要求。修改後重新執行 `qwenpaw app`。
 
-接著按照圖片中的步驟啟用 Neko 頻道。
+## 6. 在 N.E.K.O. 中啟用
 
-![啟用 Neko 頻道步驟圖 2](assets/openclaw_guide/image2.png)
+1. 啟動 QwenPaw 並保持執行。
+2. 開啟 N.E.K.O. 的貓爪／Agent 面板。
+3. 開啟 Agent 總開關。
+4. 開啟 **OpenClaw** 子開關。
+5. 等待可用性檢查。
 
-## 基礎配置：模型設定
+N.E.K.O. 預設連線 `http://127.0.0.1:8088`。若 QwenPaw 使用其他位址，請在 N.E.K.O. 的 core 設定中更新 `openclawUrl`，再重試。
 
-點擊模型，然後選擇 DashScope（根據你的 API Key 也可以選擇其他模型），點擊設定，輸入阿里雲百鍊 API Key 並儲存。
-
-![啟用 Neko 頻道步驟圖 3](assets/openclaw_guide/image3.png)
-
-儲存後回到聊天頁面，就能選擇已配置好的模型了。
-
-回到 N.E.K.O 就能使用 openclaw 了。
+目前 adapter 同時識別 QwenPaw v2 主控台 API 與舊版 agent 相容 API。可用性檢查會依實際版本探測 `/api/version` 或 `/api/agent/health`，之後使用相符的主控台或 agent endpoint。預設 console 情境不需要另建 channel 檔案。

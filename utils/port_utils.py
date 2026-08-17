@@ -1,18 +1,31 @@
 # -*- coding: utf-8 -*-
-"""
-N.E.K.O. 端口探测与健康校验工具。
+# Copyright 2025-2026 Project N.E.K.O. Team
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-提供以下能力：
-- 通过 /health 探测并校验 N.E.K.O 指纹
-- 启动锁（Windows 命名互斥体 / 跨平台文件锁）
-- Windows 上 Hyper-V 保留端口范围检测
+"""
+N.E.K.O. port probing and health-check utilities.
+
+Capabilities:
+- probe /health and verify the N.E.K.O fingerprint
+- single-instance startup lock (delegated to ``utils.single_instance``)
+- detection of Hyper-V reserved port ranges on Windows
 """
 
 import json
 import os
 import socket
 import sys
-import tempfile
 from typing import Optional
 
 from utils.logger_config import get_module_logger
@@ -53,10 +66,10 @@ def build_health_response(
     version: str = "",
     extra: dict | None = None,
 ) -> dict:
-    """构建统一的 /health 响应结构。
+    """Build the unified /health response structure.
 
-    所有 N.E.K.O HTTP 服务都应返回该格式，便于 launcher
-    与前端区分“真实后端”和“其他占用进程”。
+    All N.E.K.O HTTP services should return this format, helping the launcher
+    and frontend distinguish "the real backend" from "some other occupying process".
     """
     resp = {
         "app": HEALTH_APP_SIGNATURE,
@@ -79,13 +92,13 @@ def probe_neko_health(
     host: str = "127.0.0.1",
     timeout: float = 1.0,
 ) -> Optional[dict]:
-    """对指定端口执行 ``GET /health``。
+    """Perform a ``GET /health`` against the given port.
 
-    若响应为合法 N.E.K.O 服务则返回解析后的 JSON，
-    否则返回 ``None``。
+    Returns the parsed JSON if the response is a legitimate N.E.K.O service,
+    otherwise ``None``.
 
-    这里使用原生 socket，避免 launcher 引入 ``httpx`` / ``requests``，
-    保持启动器轻量。
+    Raw sockets are used here so the launcher doesn't pull in ``httpx`` /
+    ``requests``, keeping it lightweight.
     """
     sock: socket.socket | None = None
     try:
@@ -149,9 +162,9 @@ def probe_neko_health(
 # ---------------------------------------------------------------------------
 
 def get_hyperv_excluded_ranges() -> list[tuple[int, int]]:
-    """返回 Hyper-V / WSL 保留端口区间列表（start, end）。
+    """Return the list of Hyper-V / WSL reserved port ranges (start, end).
 
-    在非 Windows 或查询失败时返回空列表。
+    Returns an empty list on non-Windows or query failure.
     """
     if sys.platform != "win32":
         return []
@@ -185,7 +198,7 @@ def get_hyperv_excluded_ranges() -> list[tuple[int, int]]:
 
 
 def is_port_in_excluded_range(port: int, excluded: list[tuple[int, int]] | None = None) -> bool:
-    """检查端口是否落在 Hyper-V 保留区间内。"""
+    """Check whether the port falls inside a Hyper-V reserved range."""
     if excluded is None:
         excluded = get_hyperv_excluded_ranges()
     return any(lo <= port <= hi for lo, hi in excluded)
@@ -195,119 +208,44 @@ def is_port_in_excluded_range(port: int, excluded: list[tuple[int, int]] | None 
 #  启动锁
 # ---------------------------------------------------------------------------
 
-_LOCK_NAME = r"Global\NEKO_LAUNCHER_STARTUP_LOCK"
-_lock_handle = None  # Windows mutex handle
-_lock_fd = None  # POSIX file lock fd
-
-
 def acquire_startup_lock() -> bool:
-    """尝试获取系统级单实例启动锁。
+    """Back-compat façade over :mod:`utils.single_instance`.
 
-    返回 ``True`` 表示获取成功（可继续启动）。
-    返回 ``False`` 表示已有其他 launcher 持有该锁。
+    The old implementation lived here as a Windows named mutex plus a POSIX
+    ``flock``, and it disagreed with itself in three ways worth recording, since
+    they are the reason it could not be the basis of a uniqueness *proof*:
+
+    * Inverted failure polarity. A Windows mutex failure returned "go ahead"
+      while any POSIX ``OSError`` returned "somebody else is running" — and the
+      mutex lived in the ``Global\\`` namespace, which a non-elevated interactive
+      user usually cannot create, so the most common desktop configuration had
+      no lock at all.
+    * Inconsistent scope: machine-wide on Windows, per-user ``$TMPDIR`` on
+      macOS, shared ``/tmp`` on Linux (where the second user could not even open
+      the first user's lock file).
+    * It unlinked the lock file on release, which hands a third contender a
+      fresh inode while a second one is still waiting on the old one.
+
+    Uniqueness now lives in one place, and it publishes the winner's identity
+    instead of only saying "taken". This wrapper stays because ``launcher.py``
+    re-exports it and existing tests patch it by name.
     """
-    global _lock_handle, _lock_fd
+    from utils import single_instance
 
-    if sys.platform == "win32":
-        return _acquire_win32_mutex()
-    else:
-        return _acquire_file_lock()
+    try:
+        handle = single_instance.acquire_single_instance(
+            instance_id=os.environ.get("NEKO_INSTANCE_ID", ""),
+        )
+    except OSError:
+        # Not being able to consult the lock is "unknown", and unknown must not
+        # become "somebody else is running" — that would be an unclearable
+        # refusal to start on a full disk or a read-only home.
+        return True
+    return handle is not None
 
 
 def release_startup_lock() -> None:
-    """释放启动锁（尽力而为）。"""
-    global _lock_handle, _lock_fd
+    """Release the single-instance lock (best effort, idempotent)."""
+    from utils import single_instance
 
-    if sys.platform == "win32":
-        _release_win32_mutex()
-    else:
-        _release_file_lock()
-
-
-# -- Windows 命名互斥体 ----------------------------------------------------
-
-def _acquire_win32_mutex() -> bool:
-    global _lock_handle
-    try:
-        import ctypes
-        kernel32 = ctypes.windll.kernel32
-        ERROR_ALREADY_EXISTS = 183
-
-        handle = kernel32.CreateMutexW(None, True, _LOCK_NAME)
-        last_err = kernel32.GetLastError()
-
-        if handle != 0:
-            if last_err != ERROR_ALREADY_EXISTS:
-                # 成功创建新互斥体，本实例持有锁
-                _lock_handle = handle
-                return True
-            # 互斥体已存在，另一实例正在运行
-            kernel32.CloseHandle(handle)
-            return False
-        # handle == 0：创建失败
-        if last_err == ERROR_ALREADY_EXISTS:
-            return False  # 确认已有另一实例
-        # 权限或其他错误，允许启动以免误阻
-        return True
-    except Exception:
-        # 无法判定时，默认允许继续（避免误阻断）
-        return True
-
-
-def _release_win32_mutex() -> None:
-    global _lock_handle
-    if _lock_handle is None:
-        return
-    try:
-        import ctypes
-        kernel32 = ctypes.windll.kernel32
-        kernel32.ReleaseMutex(_lock_handle)
-        kernel32.CloseHandle(_lock_handle)
-    except Exception:
-        pass
-    _lock_handle = None
-
-
-# -- POSIX 文件锁 ---------------------------------------------------------
-
-_LOCK_FILE = os.path.join(tempfile.gettempdir(), "neko_launcher.lock")
-
-
-def _acquire_file_lock() -> bool:
-    global _lock_fd
-    try:
-        import fcntl
-
-        fd = open(_LOCK_FILE, "w")
-        try:
-            fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except (OSError, IOError):
-            fd.close()
-            return False
-        fd.write(str(os.getpid()))
-        fd.flush()
-        _lock_fd = fd
-        return True
-    except (OSError, IOError):
-        return False
-    except ImportError:
-        # POSIX 上通常应有 fcntl，这里仅做兜底
-        return True
-
-
-def _release_file_lock() -> None:
-    global _lock_fd
-    if _lock_fd is None:
-        return
-    try:
-        import fcntl
-
-        fcntl.flock(_lock_fd.fileno(), fcntl.LOCK_UN)
-        _lock_fd.close()
-    except Exception:
-        pass
-    _lock_fd = None
-    try:
-        os.unlink(_LOCK_FILE)
-    except Exception:
-        pass
+    single_instance.release_single_instance()
